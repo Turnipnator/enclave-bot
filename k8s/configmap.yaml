@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: enclavetrade-config
+  namespace: trading
+data:
+  ENCLAVE_ENV: "PROD"
+  TRADING_MODE: "live"
+  LOG_LEVEL: "info"
+
+  # Markets
+  TRADING_PAIRS: "BTC-USD.P,ETH-USD.P,SOL-USD.P,AVAX-USD.P"
+
+  # Risk Management
+  MAX_DAILY_LOSS: "50"
+  MAX_POSITIONS: "5"
+  POSITION_SIZE: "0.001"
+  MAX_LEVERAGE: "3"
+  MAX_DRAWDOWN: "10"
+
+  # Volume Farming
+  ENABLE_VOLUME_FARMING: "true"
+  MIN_TRADE_INTERVAL: "60"
+  TARGET_DAILY_TRADES: "100"
+  SPREAD_TOLERANCE: "0.001"
+
+  # Strategy Parameters
+  LOOKBACK_PERIOD: "10"
+  VOLUME_MULTIPLIER: "1.5"
+  TRAILING_STOP_PERCENT: "1.5"
+  USE_SCALPING: "true"
+  BREAKOUT_BUFFER: "0.001"

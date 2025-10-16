@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: enclavetrade
+  namespace: enclavetrade
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: enclavetrade
+  template:
+    metadata:
+      labels:
+        app: enclavetrade
+    spec:
+      containers:
+      # Main trading bot container
+      - name: enclavetrade
+        image: registry.homelab.local:5000/enclavetrade:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+          name: webhook
+        envFrom:
+        - secretRef:
+            name: enclavetrade-secrets
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: WEBHOOK_PORT
+          value: "3000"
+        - name: ENABLE_WEBHOOKS
+          value: "true"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: data
+          mountPath: /app/data
+        livenessProbe:
+          tcpSocket:
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+
+      # Cloudflare tunnel sidecar (optional - comment out if using ngrok)
+      # - name: cloudflared
+      #   image: cloudflare/cloudflared:latest
+      #   args:
+      #   - tunnel
+      #   - --no-autoupdate
+      #   - run
+      #   - --token
+      #   - $(TUNNEL_TOKEN)
+      #   env:
+      #   - name: TUNNEL_TOKEN
+      #     valueFrom:
+      #       secretKeyRef:
+      #         name: cloudflare-tunnel
+      #         key: token
+
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: enclavetrade
+  namespace: enclavetrade
+spec:
+  selector:
+    app: enclavetrade
+  ports:
+  - port: 3000
+    targetPort: 3000
+    name: webhook
+  type: ClusterIP
+---
+# For ngrok ingress controller (if installed)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: enclavetrade-webhook
+  namespace: enclavetrade
+  annotations:
+    # For ngrok ingress controller
+    ingress.kubernetes.io/class: "ngrok"
+    # Or for regular nginx ingress
+    # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx  # Change to "ngrok" if using ngrok ingress
+  rules:
+  - host: enclavetrade.homelab.local  # Change to your domain
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: enclavetrade
+            port:
+              number: 3000

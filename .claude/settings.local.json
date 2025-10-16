@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pkill:*)",
+      "Bash(pnpm start:*)",
+      "Bash(pnpm tsx:*)",
+      "Bash(pnpm build:*)",
+      "Bash(npx tsx:*)",
+      "Read(//dev/**)",
+      "Bash(npm install:*)",
+      "Bash(pm2 restart:*)",
+      "Bash(kill:*)",
+      "Bash(awk:*)",
+      "Bash(xargs kill:*)",
+      "Read(//Users/paulturner/.pm2/logs/**)",
+      "Bash(pm2 logs:*)",
+      "WebFetch(domain:docs.enclave.market)",
+      "Bash(pm2 status:*)",
+      "Bash(journalctl:*)",
+      "Bash(node:*)",
+      "WebSearch",
+      "Bash(FORCE_CANCEL_STALE_ORDERS=true node dist/utils/cleanupStaleOrders.js)",
+      "Bash(export FORCE_CANCEL_STALE_ORDERS=true)",
+      "Bash(tree:*)",
+      "Bash(pnpm test:*)",
+      "Bash(grep:*)",
+      "Bash(pm2 list:*)",
+      "Bash(chmod:*)",
+      "Bash(pm2 info:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

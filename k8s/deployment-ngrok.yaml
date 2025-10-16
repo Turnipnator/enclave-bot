@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: enclavetrade
+  namespace: enclavetrade
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: enclavetrade
+  template:
+    metadata:
+      labels:
+        app: enclavetrade
+    spec:
+      containers:
+      # Main trading bot container
+      - name: enclavetrade
+        image: registry.homelab.local:5000/enclavetrade:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+          name: webhook
+        envFrom:
+        - secretRef:
+            name: enclavetrade-secrets
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: WEBHOOK_PORT
+          value: "3000"
+        - name: ENABLE_WEBHOOKS
+          value: "true"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - node
+            - -e
+            - "process.exit(0)"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+
+      # ngrok sidecar for persistent tunnel
+      - name: ngrok
+        image: ngrok/ngrok:alpine
+        command:
+        - ngrok
+        - http
+        - --authtoken=$(NGROK_AUTHTOKEN)
+        - --domain=$(NGROK_DOMAIN)  # Or remove for random URL
+        - "3000"
+        env:
+        - name: NGROK_AUTHTOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ngrok-secret
+              key: authtoken
+              optional: true
+        - name: NGROK_DOMAIN
+          value: ""  # Set your ngrok domain here if you have one
+        ports:
+        - containerPort: 4040
+          name: ngrok-ui
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: enclavetrade
+  namespace: enclavetrade
+spec:
+  selector:
+    app: enclavetrade
+  ports:
+  - port: 3000
+    targetPort: 3000
+    name: webhook
+  - port: 4040
+    targetPort: 4040
+    name: ngrok-ui
+  type: ClusterIP

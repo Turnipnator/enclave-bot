@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: enclavetrade
+  namespace: trading
+  labels:
+    app: enclavetrade
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: enclavetrade
+  template:
+    metadata:
+      labels:
+        app: enclavetrade
+    spec:
+      containers:
+      - name: enclavetrade
+        image: registry.homelab.local/enclavetrade:latest
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        envFrom:
+        - configMapRef:
+            name: enclavetrade-config
+        - secretRef:
+            name: enclavetrade-secrets
+        livenessProbe:
+          exec:
+            command:
+            - node
+            - -e
+            - "process.exit(0)"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          exec:
+            command:
+            - node
+            - -e
+            - "process.exit(0)"
+          initialDelaySeconds: 10
+          periodSeconds: 10
+      restartPolicy: Always

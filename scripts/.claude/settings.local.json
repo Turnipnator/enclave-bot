@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/paulturner/enclavebot-master/**)",
+      "Bash(pnpm build:*)",
+      "Bash(lsof:*)",
+      "Bash(npx tsx:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

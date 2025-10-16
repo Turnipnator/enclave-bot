@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: enclavetrade-metrics
+  namespace: trading
+  labels:
+    app: enclavetrade
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9090
+    targetPort: 9090
+    protocol: TCP
+    name: metrics
+  selector:
+    app: enclavetrade
