@@ -755,6 +755,9 @@ class TradingBot implements BotStatusProvider {
     const positions = await this.client.getPositions();
     const metrics = this.riskManager.getRiskMetrics(positions, balance);
 
+    // Check if bot is actually running by checking if intervals are active
+    const isActuallyRunning = this.running && this.mainLoopInterval !== undefined;
+
     return {
       balance: balance.total.toNumber(),
       positions: positions.map(p => ({
@@ -765,7 +768,7 @@ class TradingBot implements BotStatusProvider {
         unrealizedPnl: p.unrealizedPnl.toFixed(2),
       })),
       dailyPnl: metrics.dailyPnl.toNumber(),
-      isRunning: this.running,
+      isRunning: isActuallyRunning,
     };
   }
 
