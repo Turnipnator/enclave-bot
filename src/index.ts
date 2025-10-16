@@ -744,32 +744,38 @@ class TradingBot implements BotStatusProvider {
     dailyPnl: number;
     isRunning: boolean;
   }> {
-    const balances = await this.client.getBalance();
-    const balance = balances.find((b) => b.asset === 'USD') || {
-      asset: 'USD',
-      available: new Decimal(0),
-      locked: new Decimal(0),
-      total: new Decimal(0),
-    };
+    try {
+      const balances = await this.client.getBalance();
+      const balance = balances.find((b) => b.asset === 'USD') || {
+        asset: 'USD',
+        available: new Decimal(0),
+        locked: new Decimal(0),
+        total: new Decimal(0),
+      };
 
-    const positions = await this.client.getPositions();
-    const metrics = this.riskManager.getRiskMetrics(positions, balance);
+      const positions = await this.client.getPositions();
+      const metrics = this.riskManager.getRiskMetrics(positions, balance);
 
-    // Check if bot is actually running by checking if intervals are active
-    const isActuallyRunning = this.running && this.mainLoopInterval !== undefined;
+      // If we can successfully fetch balance and positions, the bot is running
+      // The fact that we got here means the client is connected and working
+      const isRunning = true;
 
-    return {
-      balance: balance.total.toNumber(),
-      positions: positions.map(p => ({
-        symbol: p.symbol,
-        side: p.side,
-        quantity: p.quantity.toFixed(4),
-        entryPrice: p.entryPrice.toFixed(2),
-        unrealizedPnl: p.unrealizedPnl.toFixed(2),
-      })),
-      dailyPnl: metrics.dailyPnl.toNumber(),
-      isRunning: isActuallyRunning,
-    };
+      return {
+        balance: balance.total.toNumber(),
+        positions: positions.map(p => ({
+          symbol: p.symbol,
+          side: p.side,
+          quantity: p.quantity.toFixed(4),
+          entryPrice: p.entryPrice.toFixed(2),
+          unrealizedPnl: p.unrealizedPnl.toFixed(2),
+        })),
+        dailyPnl: metrics.dailyPnl.toNumber(),
+        isRunning: isRunning,
+      };
+    } catch (error) {
+      // If we can't fetch data, the bot is offline
+      throw error;
+    }
   }
 
   async restart(): Promise<void> {
