@@ -5,6 +5,7 @@ import { OrderSide, OrderType } from '../exchange/types';
 import { TechnicalIndicators, PriceData } from '../indicators/TechnicalIndicators';
 import { config } from '../../config/config';
 import { HealthCheck } from '../../utils/healthCheck';
+import { TelegramService } from '../../services/telegram/TelegramService';
 
 export interface BreakoutConfig {
   lookbackPeriod: number;
@@ -30,13 +31,15 @@ export class BreakoutStrategy {
   private readonly client: EnclaveClient;
   private readonly config: BreakoutConfig;
   private readonly logger: pino.Logger;
+  private readonly telegram?: TelegramService;
   private priceHistory: Map<string, PriceData[]> = new Map();
   private activeSignals: Map<string, Signal> = new Map();
   private trailingStops: Map<string, { high: Decimal; stop: Decimal }> = new Map();
 
-  constructor(client: EnclaveClient, strategyConfig: BreakoutConfig) {
+  constructor(client: EnclaveClient, strategyConfig: BreakoutConfig, telegram?: TelegramService) {
     this.client = client;
     this.config = strategyConfig;
+    this.telegram = telegram;
     this.logger = pino({ name: 'BreakoutStrategy', level: config.logLevel });
   }
 
@@ -485,6 +488,19 @@ export class BreakoutStrategy {
 
       this.logger.info(`Market order executed: ${order.id} for ${signal.symbol}`);
 
+      // Send Telegram notification
+      if (this.telegram) {
+        await this.telegram.notifyPositionOpened(
+          signal.symbol,
+          signal.side,
+          quantity.toString(),
+          signal.entryPrice,
+          signal.stopLoss,
+          signal.takeProfit,
+          signal.reason
+        );
+      }
+
       // Place separate LIMIT order for take profit
       if (signal.takeProfit) {
         try {
@@ -643,6 +659,9 @@ export class BreakoutStrategy {
 
       if (position) {
         const closeSide = position.side === OrderSide.BUY ? OrderSide.SELL : OrderSide.BUY;
+        const closePrice = position.markPrice || position.entryPrice;
+        const pnl = position.realizedPnl ? position.realizedPnl.toNumber() : 0;
+
         await this.client.addOrder(
           symbol,
           closeSide,
@@ -651,6 +670,17 @@ export class BreakoutStrategy {
         );
 
         this.logger.info(`Position closed for ${symbol}: ${reason} at ${this.trailingStops.get(symbol)?.stop}`);
+
+        // Send Telegram notification
+        if (this.telegram) {
+          await this.telegram.notifyPositionClosed(
+            symbol,
+            position.side,
+            closePrice,
+            pnl,
+            reason
+          );
+        }
       }
 
       this.activeSignals.delete(symbol);

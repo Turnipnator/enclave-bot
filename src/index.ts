@@ -6,6 +6,7 @@ import { VolumeFarmingStrategy } from './core/strategy/VolumeFarmingStrategy';
 import { RiskManager } from './core/risk/RiskManager';
 import { BinanceDataService } from './services/data/BinanceDataService';
 import { WebhookServer, TradingViewAlert } from './services/webhook/WebhookServer';
+import { TelegramService, BotStatusProvider } from './services/telegram/TelegramService';
 import Decimal from 'decimal.js';
 import { OrderSide } from './core/exchange/types';
 
@@ -21,18 +22,29 @@ const logger = pino({
   },
 });
 
-class TradingBot {
+class TradingBot implements BotStatusProvider {
   private client: EnclaveClient;
   private breakoutStrategy: BreakoutStrategy;
   private volumeFarmingStrategy: VolumeFarmingStrategy;
   private riskManager!: RiskManager; // Initialized in initializeRiskManager()
   private webhookServer?: WebhookServer;
+  private telegram: TelegramService;
   private running = false;
   private mainLoopInterval?: NodeJS.Timeout;
   private priceUpdateInterval?: NodeJS.Timeout;
 
   constructor() {
     this.client = new EnclaveClient(config.apiKey, config.apiSecret, config.environment, config.subaccountName);
+
+    // Initialize Telegram service
+    this.telegram = new TelegramService({
+      botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+      chatId: process.env.TELEGRAM_CHAT_ID || '',
+      enabled: process.env.TELEGRAM_ENABLED === 'true',
+    });
+
+    // Register this bot as the status provider
+    this.telegram.setStatusProvider(this);
 
     this.breakoutStrategy = new BreakoutStrategy(this.client, {
       lookbackPeriod: config.lookbackPeriod,
@@ -42,7 +54,7 @@ class TradingBot {
       useScalping: config.useScalping,
       breakoutBuffer: config.breakoutBuffer,
       takeProfitPercent: config.takeProfitPercent,
-    });
+    }, this.telegram);
 
     this.volumeFarmingStrategy = new VolumeFarmingStrategy(this.client, {
       enableVolumeFarming: config.enableVolumeFarming,
@@ -94,8 +106,28 @@ class TradingBot {
       this.startHistoryRefreshLoop();
 
       logger.info('Trading bot started successfully');
+
+      // Send Telegram notification and initialize tracking
+      const balances = await this.client.getBalance();
+      const balance = balances.find((b) => b.asset === 'USD') || {
+        asset: 'USD',
+        available: new Decimal(0),
+        locked: new Decimal(0),
+        total: new Decimal(0),
+      };
+      const currentBalance = balance.total.toNumber();
+
+      this.telegram.setStartBalance(currentBalance);
+      this.telegram.setDailyStartBalance(currentBalance);
+      this.telegram.setWeeklyStartBalance(currentBalance);
+
+      await this.telegram.notifyBotStarted(currentBalance);
     } catch (error) {
       logger.error({ error }, 'Failed to start trading bot');
+      await this.telegram.notifyError(
+        error instanceof Error ? error.message : String(error),
+        'Bot startup failed'
+      );
       process.exit(1);
     }
   }
@@ -310,6 +342,12 @@ class TradingBot {
           } : error,
           errorString: String(error)
         }, 'Error in main trading loop');
+
+        // Send Telegram alert for critical errors
+        await this.telegram.notifyError(
+          error instanceof Error ? error.message : String(error),
+          'Main trading loop error'
+        );
       }
     }, 5000); // Run every 5 seconds
   }
@@ -629,6 +667,22 @@ class TradingBot {
       clearInterval(this.priceUpdateInterval);
     }
 
+    // Get final balance and calculate total P&L
+    let finalBalance = 0;
+    let totalPnl = 0;
+    try {
+      const balances = await this.client.getBalance();
+      const balance = balances.find((b) => b.asset === 'USD');
+      if (balance) {
+        finalBalance = balance.total.toNumber();
+        // Calculate total P&L from start balance
+        const startBalance = this.telegram['startBalance'] || 0;
+        totalPnl = finalBalance - startBalance;
+      }
+    } catch (error) {
+      logger.error({ error }, 'Error getting final balance');
+    }
+
     // Close all positions if in live mode
     if (config.tradingMode === 'live') {
       try {
@@ -645,6 +699,9 @@ class TradingBot {
     // Disconnect from WebSocket
     this.client.disconnect();
 
+    // Send Telegram notification
+    await this.telegram.notifyBotStopped(finalBalance, totalPnl);
+
     logger.info('Trading bot stopped');
   }
 
@@ -654,6 +711,9 @@ class TradingBot {
 
   public async emergencyStop(): Promise<void> {
     logger.error('EMERGENCY STOP TRIGGERED');
+
+    // Send Telegram alert
+    await this.telegram.notifyError('Emergency stop triggered', 'CRITICAL: Bot emergency stop');
 
     // Cancel all open orders
     try {
@@ -669,6 +729,54 @@ class TradingBot {
     // Stop the bot
     await this.stop();
     process.exit(1);
+  }
+
+  // BotStatusProvider interface implementation
+  async getStatus(): Promise<{
+    balance: number;
+    positions: Array<{
+      symbol: string;
+      side: string;
+      quantity: string;
+      entryPrice: string;
+      unrealizedPnl: string;
+    }>;
+    dailyPnl: number;
+    isRunning: boolean;
+  }> {
+    const balances = await this.client.getBalance();
+    const balance = balances.find((b) => b.asset === 'USD') || {
+      asset: 'USD',
+      available: new Decimal(0),
+      locked: new Decimal(0),
+      total: new Decimal(0),
+    };
+
+    const positions = await this.client.getPositions();
+    const metrics = this.riskManager.getRiskMetrics(positions, balance);
+
+    return {
+      balance: balance.total.toNumber(),
+      positions: positions.map(p => ({
+        symbol: p.symbol,
+        side: p.side,
+        quantity: p.quantity.toFixed(4),
+        entryPrice: p.entryPrice.toFixed(2),
+        unrealizedPnl: p.unrealizedPnl.toFixed(2),
+      })),
+      dailyPnl: metrics.dailyPnl.toNumber(),
+      isRunning: this.running,
+    };
+  }
+
+  async restart(): Promise<void> {
+    logger.info('Restart requested via Telegram');
+    await this.stop();
+    setTimeout(() => {
+      this.start().catch(error => {
+        logger.error({ error }, 'Failed to restart bot');
+      });
+    }, 2000);
   }
 }
 

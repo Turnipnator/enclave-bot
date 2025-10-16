@@ -1,0 +1,84 @@
+version: '3.8'
+
+services:
+  enclave-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: enclave-trading-bot
+    restart: unless-stopped
+    environment:
+      # Enclave API Configuration
+      - ENCLAVE_API_KEY=${ENCLAVE_API_KEY}
+      - ENCLAVE_API_SECRET=${ENCLAVE_API_SECRET}
+      - ENCLAVE_ENV=${ENCLAVE_ENV:-PROD}
+      - ENCLAVE_SUBACCOUNT=${ENCLAVE_SUBACCOUNT:-botman}
+
+      # Trading Configuration
+      - TRADING_MODE=${TRADING_MODE:-live}
+      - MAX_DAILY_LOSS=${MAX_DAILY_LOSS:-100}
+      - POSITION_SIZE=${POSITION_SIZE:-0.01}
+      - MAX_POSITIONS=${MAX_POSITIONS:-3}
+      - MAX_LEVERAGE=${MAX_LEVERAGE:-1}
+      - MAX_DRAWDOWN=${MAX_DRAWDOWN:-10}
+
+      # Strategy Configuration
+      - LOOKBACK_PERIOD=${LOOKBACK_PERIOD:-20}
+      - VOLUME_MULTIPLIER=${VOLUME_MULTIPLIER:-2.0}
+      - TRAILING_STOP_PERCENT=${TRAILING_STOP_PERCENT:-4}
+      - BREAKOUT_BUFFER=${BREAKOUT_BUFFER:-0.2}
+      - TAKE_PROFIT_PERCENT=${TAKE_PROFIT_PERCENT:-6}
+
+      # Telegram Configuration
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-true}
+
+      # Webhook Configuration (optional)
+      - ENABLE_WEBHOOKS=${ENABLE_WEBHOOKS:-false}
+      - WEBHOOK_PORT=${WEBHOOK_PORT:-3000}
+
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - NODE_ENV=production
+
+      # Timezone
+      - TZ=Europe/London
+
+    ports:
+      - "3000:3000"  # Webhook port (optional)
+
+    volumes:
+      - ./logs:/app/logs
+
+    networks:
+      - enclave-network
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+networks:
+  enclave-network:
+    driver: bridge
