@@ -12,7 +12,6 @@ services:
       - ENCLAVE_API_KEY=${ENCLAVE_API_KEY}
       - ENCLAVE_API_SECRET=${ENCLAVE_API_SECRET}
       - ENCLAVE_ENV=${ENCLAVE_ENV:-PROD}
-      - ENCLAVE_SUBACCOUNT=${ENCLAVE_SUBACCOUNT:-botman}
 
       # Trading Configuration
       - TRADING_MODE=${TRADING_MODE:-live}
