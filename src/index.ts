@@ -756,9 +756,9 @@ class TradingBot implements BotStatusProvider {
       const positions = await this.client.getPositions();
       const metrics = this.riskManager.getRiskMetrics(positions, balance);
 
-      // If we can successfully fetch balance and positions, the bot is running
-      // The fact that we got here means the client is connected and working
-      const isRunning = true;
+      // Check the actual running flag - this is set to false when stop() is called
+      // The bot can still fetch data (client is connected) but trading loops are stopped
+      const isRunning = this.running;
 
       return {
         balance: balance.total.toNumber(),
