@@ -65,10 +65,10 @@ export class BreakoutStrategy {
       increment = 0.001; // 3 decimal places
     } else if (symbol === 'SUI-USD.P') {
       increment = 0.0001; // 4 decimal places
-    } else if (symbol === 'TON-USD.P') {
+    } else if (symbol === 'HYPE-USD.P') {
       increment = 0.001; // 3 decimal places
-    } else if (symbol === 'ADA-USD.P') {
-      increment = 0.0001; // 4 decimal places
+    } else if (symbol === 'NXP-USD.P') {
+      increment = 0.001; // 3 decimal places
     } else {
       increment = 0.001; // Default to 3 decimal places
     }

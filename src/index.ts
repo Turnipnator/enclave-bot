@@ -591,12 +591,16 @@ class TradingBot implements BotStatusProvider {
           } else if (pair === 'SUI-USD.P') {
             // SUI: 6 SUI (~$24 at $4)
             tokenQuantity = new Decimal(6);
-          } else if (pair === 'TON-USD.P') {
-            // TON: 4 TON (~$24 at $6)
-            tokenQuantity = new Decimal(4);
-          } else if (pair === 'ADA-USD.P') {
-            // ADA: 25 ADA (~$25 at $1)
-            tokenQuantity = new Decimal(25);
+          } else if (pair === 'HYPE-USD.P') {
+            // HYPE: Calculate $25 worth dynamically
+            const targetUsd = new Decimal(25);
+            const rawQuantity = targetUsd.dividedBy(signal.entryPrice);
+            tokenQuantity = rawQuantity.toDecimalPlaces(2);
+          } else if (pair === 'NXP-USD.P') {
+            // NXP: Calculate $25 worth dynamically
+            const targetUsd = new Decimal(25);
+            const rawQuantity = targetUsd.dividedBy(signal.entryPrice);
+            tokenQuantity = rawQuantity.toDecimalPlaces(2);
           } else {
             // Safe default for any other pairs - $25 worth, rounded to 0.01
             const targetUsd = new Decimal(25);
