@@ -522,14 +522,16 @@ class TradingBot implements BotStatusProvider {
       try {
         logger.debug(`Processing ${pair}...`);
 
-        // Check for volume farming opportunities
-        logger.debug(`Evaluating volume farming for ${pair}...`);
-        if (await this.volumeFarmingStrategy.evaluate(pair)) {
-          logger.debug(`Volume farming opportunity found for ${pair}`);
-          if (config.tradingMode === 'live' || config.tradingMode === 'paper') {
-            await this.volumeFarmingStrategy.executeFarmingTrade(pair);
+        // Check for volume farming opportunities (only if enabled)
+        if (config.enableVolumeFarming) {
+          logger.debug(`Evaluating volume farming for ${pair}...`);
+          if (await this.volumeFarmingStrategy.evaluate(pair)) {
+            logger.debug(`Volume farming opportunity found for ${pair}`);
+            if (config.tradingMode === 'live' || config.tradingMode === 'paper') {
+              await this.volumeFarmingStrategy.executeFarmingTrade(pair);
+            }
+            continue; // Skip breakout strategy for this cycle
           }
-          continue; // Skip breakout strategy for this cycle
         }
 
         // DISABLED: updatePriceHistory() corrupts data by adding 24h summary as 5-min candles

@@ -131,7 +131,7 @@ export function loadConfig(): Config {
     maxDrawdown: getEnvDecimal('MAX_DRAWDOWN', '10'),
 
     // Volume Farming
-    enableVolumeFarming: getEnvBoolean('ENABLE_VOLUME_FARMING', true),
+    enableVolumeFarming: getEnvBoolean('ENABLE_VOLUME_FARMING', false),
     minTradeInterval: getEnvNumber('MIN_TRADE_INTERVAL', 60),
     targetDailyTrades: getEnvNumber('TARGET_DAILY_TRADES', 100),
     spreadTolerance: getEnvDecimal('SPREAD_TOLERANCE', '0.001'),
