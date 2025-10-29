@@ -19,6 +19,19 @@ An automated cryptocurrency trading bot for [Enclave Markets](https://enclave.ma
 - 🌐 **WebSocket Real-time Data** - Live market data streaming
 - ☁️ **Cloud Native** - Docker containerized with Kubernetes deployment
 
+## 🔗 Getting Started with Enclave Markets
+
+This bot trades on **[Enclave Markets](https://enclave.trade?ref=turnipnator)** - a next-generation encrypted perpetuals exchange o$
+
+- 🔐 **Fully Encrypted Order Book** - Your trades are hidden from MEV bots and front-runners
+- 💰 **Trading Rewards** - Earn points and fee discounts through volume-based rewards
+- ⚡ **Low Fees** - Competitive maker/taker fees with additional referral discounts
+- 🛡️ **Fair Execution** - No information leakage, true DeFi privacy
+
+### Sign Up with Referral Benefits
+
+**Use this referral link to get started:** [https://enclave.trade?ref=turnipnator](https://enclave.trade?ref=turnipnator)
+
 ## 🚀 Quick Start
 
 ### Prerequisites
