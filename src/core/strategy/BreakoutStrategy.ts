@@ -319,13 +319,13 @@ export class BreakoutStrategy {
       // Only take signals that align with the trend
       if (breakout && volumeSpike && breakoutCandle) {
         // BULLISH breakout: Only if we're in an UPTREND
-        if (breakout === 'BULLISH' && trend !== 'UPTREND') {
+        if (breakout === 'BULLISH' && trend === 'DOWNTREND') {
           this.logger.info(`${symbol}: BULLISH breakout REJECTED - trend is ${trend}, not UPTREND`);
           return null;
         }
 
         // BEARISH breakout: Only if we're in a DOWNTREND
-        if (breakout === 'BEARISH' && trend !== 'DOWNTREND') {
+        if (breakout === 'BEARISH' && trend === 'UPTREND') {
           this.logger.info(`${symbol}: BEARISH breakout REJECTED - trend is ${trend}, not DOWNTREND`);
           return null;
         }
