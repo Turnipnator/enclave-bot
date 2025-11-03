@@ -38,6 +38,12 @@ export interface Config {
   breakoutBuffer: number;
   takeProfitPercent?: number;
 
+  // Trend Following Strategy
+  enableTrendFollowing: boolean;
+  trendFollowingSmaPeriod: number;
+  trendFollowingMinConsecutiveTrends: number;
+  trendFollowingMaxDistanceFromHigh: number; // Percentage (e.g., 2 = 2%)
+
   // Logging
   logLevel: string;
 }
@@ -143,6 +149,12 @@ export function loadConfig(): Config {
     useScalping: getEnvBoolean('USE_SCALPING', true),
     breakoutBuffer: getEnvNumber('BREAKOUT_BUFFER', 0.001),
     takeProfitPercent: process.env.TAKE_PROFIT_PERCENT ? getEnvNumber('TAKE_PROFIT_PERCENT', 3) : undefined,
+
+    // Trend Following Strategy
+    enableTrendFollowing: getEnvBoolean('ENABLE_TREND_FOLLOWING', false),
+    trendFollowingSmaPeriod: getEnvNumber('TREND_FOLLOWING_SMA_PERIOD', 20),
+    trendFollowingMinConsecutiveTrends: getEnvNumber('TREND_FOLLOWING_MIN_CONSECUTIVE_TRENDS', 3),
+    trendFollowingMaxDistanceFromHigh: getEnvNumber('TREND_FOLLOWING_MAX_DISTANCE_FROM_HIGH', 2),
 
     // Logging
     logLevel: getEnvVar('LOG_LEVEL', 'info'),

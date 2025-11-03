@@ -35,6 +35,8 @@ export class BreakoutStrategy {
   private priceHistory: Map<string, PriceData[]> = new Map();
   private activeSignals: Map<string, Signal> = new Map();
   private trailingStops: Map<string, { high: Decimal; stop: Decimal }> = new Map();
+  // Trend Following: Track last N trend readings for each symbol
+  private trendHistory: Map<string, Array<'UPTREND' | 'DOWNTREND' | 'SIDEWAYS'>> = new Map();
 
   constructor(client: EnclaveClient, strategyConfig: BreakoutConfig, telegram?: TelegramService) {
     this.client = client;
@@ -443,6 +445,21 @@ export class BreakoutStrategy {
         }
       }
 
+      // TREND FOLLOWING: Check for slow grind opportunities (if enabled)
+      if (config.enableTrendFollowing) {
+        const trendFollowingSignal = this.generateTrendFollowingSignal(
+          symbol,
+          history,
+          currentPrice,
+          trend,
+          priceStructure,
+          avgVolume
+        );
+        if (trendFollowingSignal) {
+          return trendFollowingSignal;
+        }
+      }
+
       return null;
     } catch (error) {
       this.logger.error({
@@ -452,6 +469,179 @@ export class BreakoutStrategy {
         } : error,
         symbol
       }, `Failed to generate signal for ${symbol}`);
+      return null;
+    }
+  }
+
+  /**
+   * Update trend history for consecutive trend tracking
+   */
+  private updateTrendHistory(symbol: string, trend: 'UPTREND' | 'DOWNTREND' | 'SIDEWAYS'): void {
+    const history = this.trendHistory.get(symbol) || [];
+    history.push(trend);
+
+    // Keep only last 10 trend readings (enough for tracking)
+    if (history.length > 10) {
+      history.shift();
+    }
+
+    this.trendHistory.set(symbol, history);
+  }
+
+  /**
+   * Check if trend has been consistent for N consecutive checks
+   */
+  private hasConsecutiveTrend(
+    symbol: string,
+    expectedTrend: 'UPTREND' | 'DOWNTREND',
+    minConsecutive: number
+  ): boolean {
+    const history = this.trendHistory.get(symbol) || [];
+
+    if (history.length < minConsecutive) {
+      return false;
+    }
+
+    // Check last N readings
+    const recent = history.slice(-minConsecutive);
+    return recent.every(t => t === expectedTrend);
+  }
+
+  /**
+   * Generate trend-following signal for slow grinds
+   * This catches gradual moves that don't trigger breakout signals
+   */
+  private generateTrendFollowingSignal(
+    symbol: string,
+    history: PriceData[],
+    currentPrice: Decimal,
+    trend: 'UPTREND' | 'DOWNTREND' | 'SIDEWAYS',
+    priceStructure: 'HIGHER_HIGHS' | 'LOWER_LOWS' | 'CHOPPY',
+    avgVolume: Decimal
+  ): Signal | null {
+    try {
+      // Update trend history for this symbol
+      this.updateTrendHistory(symbol, trend);
+
+      // Get consecutive trend requirements from config
+      const minConsecutive = config.trendFollowingMinConsecutiveTrends;
+      const smaPeriod = config.trendFollowingSmaPeriod;
+      const maxDistanceFromHigh = config.trendFollowingMaxDistanceFromHigh / 100; // Convert % to decimal
+
+      // Need enough price history for SMA
+      if (history.length < smaPeriod) {
+        return null;
+      }
+
+      // Calculate SMA for price confirmation
+      const closePrices = history.map(h => h.close);
+      const sma = TechnicalIndicators.calculateSMA(closePrices, smaPeriod);
+
+      // Check current volume (need some activity, not dead market)
+      const currentVolume = history[history.length - 1].volume;
+      const volumeRatio = currentVolume.dividedBy(avgVolume);
+
+      // Minimum volume threshold (0.5x average - catches slow bleeds)
+      if (volumeRatio.lessThan(this.config.volumeMultiplier)) {
+        return null;
+      }
+
+      // Calculate recent high/low for distance check
+      const recentPrices = history.slice(-smaPeriod);
+      const recentHigh = Decimal.max(...recentPrices.map(p => p.high));
+      const recentLow = Decimal.min(...recentPrices.map(p => p.low));
+
+      // SHORT SIGNAL: Consistent DOWNTREND + price below SMA + within % of recent high
+      if (this.hasConsecutiveTrend(symbol, 'DOWNTREND', minConsecutive)) {
+        // Price must be below SMA (confirming downtrend)
+        if (currentPrice.lessThan(sma)) {
+          // Price must be within X% of recent high (not too deep in the move already)
+          const distanceFromHigh = recentHigh.minus(currentPrice).dividedBy(recentHigh);
+
+          if (distanceFromHigh.lessThanOrEqualTo(maxDistanceFromHigh)) {
+            // Additional confirmation: price structure should show LOWER_LOWS
+            if (priceStructure === 'LOWER_LOWS') {
+              const entryPrice = currentPrice;
+              const stopLoss = entryPrice.times(1 + this.config.trailingStopPercent / 100);
+
+              // Calculate RSI for filtering
+              const rsi = TechnicalIndicators.calculateRSI(history);
+
+              // Don't SHORT at extreme oversold (< 30)
+              if (rsi.lessThan(30)) {
+                this.logger.debug(`${symbol}: TREND-FOLLOWING SHORT rejected - RSI ${rsi.toFixed(2)} too oversold`);
+                return null;
+              }
+
+              let takeProfit: Decimal | undefined;
+              if (this.config.takeProfitPercent) {
+                takeProfit = entryPrice.times(1 - this.config.takeProfitPercent / 100);
+              }
+
+              const signal: Signal = {
+                symbol,
+                side: OrderSide.SELL,
+                entryPrice,
+                stopLoss,
+                takeProfit,
+                confidence: 0.65, // Lower confidence than breakouts
+                reason: `TREND-FOLLOWING SHORT: ${minConsecutive} consecutive DOWNTREND checks, price < SMA(${smaPeriod}), LOWER_LOWS structure, ${distanceFromHigh.times(100).toFixed(1)}% from high, RSI: ${rsi.toFixed(2)}`,
+              };
+
+              this.logger.info({ signal }, `📉 TREND-FOLLOWING SHORT signal for ${symbol} (slow bleed)`);
+              return signal;
+            }
+          }
+        }
+      }
+
+      // LONG SIGNAL: Consistent UPTREND + price above SMA + within % of recent low
+      if (this.hasConsecutiveTrend(symbol, 'UPTREND', minConsecutive)) {
+        // Price must be above SMA (confirming uptrend)
+        if (currentPrice.greaterThan(sma)) {
+          // Price must be within X% of recent low (not too high in the move already)
+          const distanceFromLow = currentPrice.minus(recentLow).dividedBy(recentLow);
+
+          if (distanceFromLow.lessThanOrEqualTo(maxDistanceFromHigh)) {
+            // Additional confirmation: price structure should show HIGHER_HIGHS
+            if (priceStructure === 'HIGHER_HIGHS') {
+              const entryPrice = currentPrice;
+              const stopLoss = entryPrice.times(1 - this.config.trailingStopPercent / 100);
+
+              // Calculate RSI for filtering
+              const rsi = TechnicalIndicators.calculateRSI(history);
+
+              // Don't LONG at extreme overbought (> 80)
+              if (rsi.greaterThan(80)) {
+                this.logger.debug(`${symbol}: TREND-FOLLOWING LONG rejected - RSI ${rsi.toFixed(2)} too overbought`);
+                return null;
+              }
+
+              let takeProfit: Decimal | undefined;
+              if (this.config.takeProfitPercent) {
+                takeProfit = entryPrice.times(1 + this.config.takeProfitPercent / 100);
+              }
+
+              const signal: Signal = {
+                symbol,
+                side: OrderSide.BUY,
+                entryPrice,
+                stopLoss,
+                takeProfit,
+                confidence: 0.65, // Lower confidence than breakouts
+                reason: `TREND-FOLLOWING LONG: ${minConsecutive} consecutive UPTREND checks, price > SMA(${smaPeriod}), HIGHER_HIGHS structure, ${distanceFromLow.times(100).toFixed(1)}% from low, RSI: ${rsi.toFixed(2)}`,
+              };
+
+              this.logger.info({ signal }, `📈 TREND-FOLLOWING LONG signal for ${symbol} (slow grind up)`);
+              return signal;
+            }
+          }
+        }
+      }
+
+      return null;
+    } catch (error) {
+      this.logger.error({ error, symbol }, `Failed to generate trend-following signal for ${symbol}`);
       return null;
     }
   }
