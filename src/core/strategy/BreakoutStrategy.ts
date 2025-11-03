@@ -564,14 +564,8 @@ export class BreakoutStrategy {
               const entryPrice = currentPrice;
               const stopLoss = entryPrice.times(1 + this.config.trailingStopPercent / 100);
 
-              // Calculate RSI for filtering
+              // Calculate RSI for logging only (no filter for trend-following)
               const rsi = TechnicalIndicators.calculateRSI(history);
-
-              // Don't SHORT at extreme oversold (< 30)
-              if (rsi.lessThan(30)) {
-                this.logger.debug(`${symbol}: TREND-FOLLOWING SHORT rejected - RSI ${rsi.toFixed(2)} too oversold`);
-                return null;
-              }
 
               let takeProfit: Decimal | undefined;
               if (this.config.takeProfitPercent) {
@@ -608,14 +602,8 @@ export class BreakoutStrategy {
               const entryPrice = currentPrice;
               const stopLoss = entryPrice.times(1 - this.config.trailingStopPercent / 100);
 
-              // Calculate RSI for filtering
+              // Calculate RSI for logging only (no filter for trend-following)
               const rsi = TechnicalIndicators.calculateRSI(history);
-
-              // Don't LONG at extreme overbought (> 80)
-              if (rsi.greaterThan(80)) {
-                this.logger.debug(`${symbol}: TREND-FOLLOWING LONG rejected - RSI ${rsi.toFixed(2)} too overbought`);
-                return null;
-              }
 
               let takeProfit: Decimal | undefined;
               if (this.config.takeProfitPercent) {

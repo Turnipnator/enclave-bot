@@ -26,7 +26,10 @@
       "Bash(grep:*)",
       "Bash(pm2 list:*)",
       "Bash(chmod:*)",
-      "Bash(pm2 info:*)"
+      "Bash(pm2 info:*)",
+      "Bash(git stash:*)",
+      "Bash(ssh:*)",
+      "Bash(test:*)"
     ],
     "deny": [],
     "ask": []
