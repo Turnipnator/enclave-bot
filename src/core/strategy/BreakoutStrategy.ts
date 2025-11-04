@@ -37,6 +37,9 @@ export class BreakoutStrategy {
   private trailingStops: Map<string, { high: Decimal; stop: Decimal }> = new Map();
   // Trend Following: Track last N trend readings for each symbol
   private trendHistory: Map<string, Array<'UPTREND' | 'DOWNTREND' | 'SIDEWAYS'>> = new Map();
+  // Stop Loss Cooldown: Prevent whipsaw re-entries after stop loss hits
+  private stopLossCooldowns: Map<string, number> = new Map(); // symbol -> timestamp
+  private readonly STOP_LOSS_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
   constructor(client: EnclaveClient, strategyConfig: BreakoutConfig, telegram?: TelegramService) {
     this.client = client;
@@ -140,6 +143,21 @@ export class BreakoutStrategy {
     if (!historyCheck.valid) {
       this.logger.error({ symbol, errors: historyCheck.errors }, `Price history validation failed for ${symbol} - skipping signal generation`);
       return null;
+    }
+
+    // Check stop loss cooldown - prevent whipsaw re-entries
+    const cooldownTimestamp = this.stopLossCooldowns.get(symbol);
+    if (cooldownTimestamp) {
+      const timeElapsed = Date.now() - cooldownTimestamp;
+      if (timeElapsed < this.STOP_LOSS_COOLDOWN_MS) {
+        const minutesRemaining = Math.ceil((this.STOP_LOSS_COOLDOWN_MS - timeElapsed) / 60000);
+        this.logger.debug(`⏱️  ${symbol} in stop loss cooldown - ${minutesRemaining} min remaining`);
+        return null;
+      } else {
+        // Cooldown expired, remove it
+        this.stopLossCooldowns.delete(symbol);
+        this.logger.info(`✅ Stop loss cooldown expired for ${symbol} - can trade again`);
+      }
     }
 
     try {
@@ -859,6 +877,12 @@ export class BreakoutStrategy {
             reason
           );
         }
+      }
+
+      // Set cooldown if this was a stop loss
+      if (reason === 'Stop Loss Hit') {
+        this.stopLossCooldowns.set(symbol, Date.now());
+        this.logger.info(`⏱️  Stop loss cooldown activated for ${symbol} - no re-entry for ${this.STOP_LOSS_COOLDOWN_MS / 60000} minutes`);
       }
 
       this.activeSignals.delete(symbol);
