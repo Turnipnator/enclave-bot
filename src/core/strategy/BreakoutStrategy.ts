@@ -187,10 +187,10 @@ export class BreakoutStrategy {
       const trend = TechnicalIndicators.detectTrend(history, 20, 50);
       const priceStructure = TechnicalIndicators.detectPriceStructure(history, 10);
 
-      // NEW: Check last 10 candles for breakout + volume spike (not just current)
+      // NEW: Check last 5 candles for breakout + volume spike (not just current)
       // This catches violent moves that happen between bot checks
-      // Using 10 candles (50 min on 5m chart) to catch moves that happened recently
-      const candleLookback = Math.min(10, history.length);
+      // Using 5 candles (25 min on 5m chart) for fresher signals with more momentum remaining
+      const candleLookback = Math.min(5, history.length);
       let breakoutCandle: PriceData | null = null;
       let breakoutType: 'BULLISH' | 'BEARISH' | null = null;
 
@@ -360,6 +360,13 @@ export class BreakoutStrategy {
           this.logger.info(`${symbol}: BEARISH breakout REJECTED - price structure shows HIGHER_HIGHS`);
           return null;
         }
+
+        // CHOPPY market filter: Reject signals in choppy markets (whipsaw prevention)
+        if (priceStructure === 'CHOPPY') {
+          this.logger.info(`${symbol}: ${breakout} signal REJECTED - market structure is CHOPPY (whipsaw risk)`);
+          return null;
+        }
+
         const side = breakout === 'BULLISH' ? OrderSide.BUY : OrderSide.SELL;
 
         // Use current price for entry (we're entering now, not at the breakout candle)
@@ -373,26 +380,21 @@ export class BreakoutStrategy {
         // Calculate RSI for additional confirmation
         const rsi = TechnicalIndicators.calculateRSI(history);
 
-        // CRITICAL RSI FILTER: Prevent counter-trend entries at extreme levels
-        // ASYMMETRIC THRESHOLDS (oversold bounces more reliable than overbought reversals):
-        // - Don't SHORT when RSI < 30 (too oversold, high bounce risk)
-        // - Don't LONG when RSI > 80 (extremely overbought, allow strong uptrends up to 80)
-        if (breakout === 'BEARISH' && rsi.lessThan(30)) {
-          this.logger.info(`${symbol}: BEARISH signal REJECTED - RSI ${rsi.toFixed(2)} is too oversold (< 30), high bounce risk`);
+        // CRITICAL RSI FILTER: Only trade in the neutral zone (40-60)
+        // This ensures we enter with room to run in either direction
+        // Avoids extremes: overbought (>60) has reversal risk, oversold (<40) has bounce risk
+        if (rsi.lessThan(40)) {
+          this.logger.info(`${symbol}: ${breakout} signal REJECTED - RSI ${rsi.toFixed(2)} too oversold (< 40), need neutral zone`);
           return null;
         }
-        if (breakout === 'BULLISH' && rsi.greaterThan(80)) {
-          this.logger.info(`${symbol}: BULLISH signal REJECTED - RSI ${rsi.toFixed(2)} is extremely overbought (> 80), high reversal risk`);
+        if (rsi.greaterThan(60)) {
+          this.logger.info(`${symbol}: ${breakout} signal REJECTED - RSI ${rsi.toFixed(2)} too overbought (> 60), need neutral zone`);
           return null;
         }
 
-        let confidence = 0.5;
-
-        if (breakout === 'BULLISH' && rsi.lessThan(70)) {
-          confidence = 0.7;
-        } else if (breakout === 'BEARISH' && rsi.greaterThan(30)) {
-          confidence = 0.7;
-        }
+        // Confidence: RSI 40-60 is our ideal range (all trades are in this zone due to filter)
+        // Give high base confidence since we're trading in neutral territory with room to run
+        let confidence = 0.8;
 
         // Check ATR for volatility confirmation
         const atr = TechnicalIndicators.calculateATR(history, Math.min(14, history.length - 1));
