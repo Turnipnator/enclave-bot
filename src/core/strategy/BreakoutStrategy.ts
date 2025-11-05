@@ -377,24 +377,11 @@ export class BreakoutStrategy {
             ? entryPrice.times(1 - this.config.trailingStopPercent / 100)
             : entryPrice.times(1 + this.config.trailingStopPercent / 100);
 
-        // Calculate RSI for additional confirmation
+        // Calculate RSI for logging (not used as filter - trend + CHOPPY filters are sufficient)
         const rsi = TechnicalIndicators.calculateRSI(history);
 
-        // CRITICAL RSI FILTER: Only trade in the neutral zone (40-60)
-        // This ensures we enter with room to run in either direction
-        // Avoids extremes: overbought (>60) has reversal risk, oversold (<40) has bounce risk
-        if (rsi.lessThan(40)) {
-          this.logger.info(`${symbol}: ${breakout} signal REJECTED - RSI ${rsi.toFixed(2)} too oversold (< 40), need neutral zone`);
-          return null;
-        }
-        if (rsi.greaterThan(60)) {
-          this.logger.info(`${symbol}: ${breakout} signal REJECTED - RSI ${rsi.toFixed(2)} too overbought (> 60), need neutral zone`);
-          return null;
-        }
-
-        // Confidence: RSI 40-60 is our ideal range (all trades are in this zone due to filter)
-        // Give high base confidence since we're trading in neutral territory with room to run
-        let confidence = 0.8;
+        // Base confidence for trend-aligned signals
+        let confidence = 0.7;
 
         // Check ATR for volatility confirmation
         const atr = TechnicalIndicators.calculateATR(history, Math.min(14, history.length - 1));
