@@ -748,7 +748,13 @@ export class BreakoutStrategy {
       const position = positions.find(p => p.symbol === symbol);
 
       if (!position) {
-        // Position no longer exists, clean up tracking
+        // Position no longer exists (closed externally or hit stop), clean up tracking
+        this.logger.warn(`Position for ${symbol} no longer exists - was likely stopped out or closed manually`);
+
+        // CRITICAL: Set cooldown to prevent immediate re-entry whipsaw
+        this.stopLossCooldowns.set(symbol, Date.now());
+        this.logger.info(`⏱️  Stop loss cooldown activated for ${symbol} (closed externally) - no re-entry for ${this.STOP_LOSS_COOLDOWN_MS / 60000} minutes`);
+
         this.activeSignals.delete(symbol);
         this.trailingStops.delete(symbol);
         return;
@@ -845,7 +851,15 @@ export class BreakoutStrategy {
       if (position) {
         const closeSide = position.side === OrderSide.BUY ? OrderSide.SELL : OrderSide.BUY;
         const closePrice = position.markPrice || position.entryPrice;
-        const pnl = position.realizedPnl ? position.realizedPnl.toNumber() : 0;
+
+        // Calculate P&L manually instead of trusting API's unrealizedPnl (which is often 0 or stale)
+        // LONG: profit when price goes up (closePrice > entryPrice)
+        // SHORT: profit when price goes down (entryPrice > closePrice)
+        const pnl = position.side === OrderSide.BUY
+          ? closePrice.minus(position.entryPrice).times(position.quantity).toNumber()
+          : position.entryPrice.minus(closePrice).times(position.quantity).toNumber();
+
+        this.logger.info(`Closing ${symbol} position: entry=${position.entryPrice.toString()}, close=${closePrice.toString()}, qty=${position.quantity.toString()}, calculated P&L=$${pnl.toFixed(2)}`);
 
         await this.client.addOrder(
           symbol,
