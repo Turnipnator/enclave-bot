@@ -140,7 +140,9 @@ export class EnclaveClient {
   private subscribeToPublicChannels(): void {
     if (!this.ws) return;
 
-    const markets = ['ETH-USD.P', 'SOL-USD.P', 'AVAX-USD.P'];
+    // Subscribe to all trading pairs from config instead of hardcoded list
+    const { config } = require('../../config/config');
+    const markets = config.tradingPairs;
 
     // Subscribe to top of book
     this.ws.send(
