@@ -39,7 +39,7 @@ export class BreakoutStrategy {
   private trendHistory: Map<string, Array<'UPTREND' | 'DOWNTREND' | 'SIDEWAYS'>> = new Map();
   // Stop Loss Cooldown: Prevent whipsaw re-entries after stop loss hits
   private stopLossCooldowns: Map<string, number> = new Map(); // symbol -> timestamp
-  private readonly STOP_LOSS_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+  private readonly STOP_LOSS_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes - longer cooldown to prevent whipsaw death spirals
 
   constructor(client: EnclaveClient, strategyConfig: BreakoutConfig, telegram?: TelegramService) {
     this.client = client;
@@ -147,13 +147,19 @@ export class BreakoutStrategy {
       return null;
     }
 
+    // CRITICAL: Check if we already have an active position/signal for this symbol
+    if (this.activeSignals.has(symbol)) {
+      this.logger.debug(`Already have active signal for ${symbol} - skipping`);
+      return null;
+    }
+
     // Check stop loss cooldown - prevent whipsaw re-entries
     const cooldownTimestamp = this.stopLossCooldowns.get(symbol);
     if (cooldownTimestamp) {
       const timeElapsed = Date.now() - cooldownTimestamp;
       if (timeElapsed < this.STOP_LOSS_COOLDOWN_MS) {
         const minutesRemaining = Math.ceil((this.STOP_LOSS_COOLDOWN_MS - timeElapsed) / 60000);
-        this.logger.debug(`⏱️  ${symbol} in stop loss cooldown - ${minutesRemaining} min remaining`);
+        this.logger.info(`⏱️  ${symbol} BLOCKED by stop loss cooldown - ${minutesRemaining} min remaining`);
         return null;
       } else {
         // Cooldown expired, remove it
@@ -646,6 +652,33 @@ export class BreakoutStrategy {
   public async executeSignal(signal: Signal, customQuantity?: Decimal): Promise<void> {
     try {
       this.logger.info(`Executing signal for ${signal.symbol}: ${signal.side} @ ${signal.entryPrice}`);
+
+      // CRITICAL: Double-check we don't already have a position for this symbol
+      if (this.activeSignals.has(signal.symbol)) {
+        this.logger.warn(`🚫 BLOCKED: Already have active signal for ${signal.symbol} - preventing duplicate position`);
+        return;
+      }
+
+      // CRITICAL: Check cooldown one more time at execution
+      const cooldownTimestamp = this.stopLossCooldowns.get(signal.symbol);
+      if (cooldownTimestamp) {
+        const timeElapsed = Date.now() - cooldownTimestamp;
+        if (timeElapsed < this.STOP_LOSS_COOLDOWN_MS) {
+          const minutesRemaining = Math.ceil((this.STOP_LOSS_COOLDOWN_MS - timeElapsed) / 60000);
+          this.logger.warn(`🚫 BLOCKED: ${signal.symbol} in cooldown - ${minutesRemaining} min remaining`);
+          return;
+        }
+      }
+
+      // CRITICAL: Check if position already exists on exchange
+      const existingPositions = await this.client.getPositions();
+      const existingPosition = existingPositions.find(p => p.symbol === signal.symbol);
+      if (existingPosition) {
+        this.logger.warn(`🚫 BLOCKED: Position already exists for ${signal.symbol} on exchange - registering it instead`);
+        // Register it so we can track it
+        await this.registerExistingPosition(signal.symbol, existingPosition.side, existingPosition.entryPrice, existingPosition.quantity);
+        return;
+      }
 
       // Validate signal has all required fields
       if (!signal.entryPrice || !signal.stopLoss) {
