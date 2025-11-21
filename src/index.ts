@@ -563,51 +563,28 @@ class TradingBot implements BotStatusProvider {
             continue;
           }
 
-          // Use appropriate position size based on token price - targeting ~$30 per trade
-          // Position sizes based on your preferences
+          // Dynamic position sizing - $50 worth of each token
+          // Automatically adjusts to current price, no hardcoded quantities
+          const targetUsd = new Decimal(50);
+          const rawQuantity = targetUsd.dividedBy(signal.entryPrice);
+
+          // Round to appropriate decimal places based on token price
           let tokenQuantity: Decimal;
-          if (pair === 'BTC-USD.P') {
-            // Your preference: 0.0002 BTC (~$13)
-            tokenQuantity = new Decimal(0.0002);
-          } else if (pair === 'ETH-USD.P') {
-            // Fixed: 0.01 ETH minimum increment required by Enclave
-            tokenQuantity = new Decimal(0.01);
-          } else if (pair === 'SOL-USD.P') {
-            // Your preference: 0.1 SOL (~$24)
-            tokenQuantity = new Decimal(0.1);
-          } else if (pair === 'AVAX-USD.P') {
-            // Your preference: 1.0 AVAX (~$34)
-            tokenQuantity = new Decimal(1.0);
-          } else if (pair === 'XRP-USD.P') {
-            // Your preference: 10 XRP (~$6.50)
-            tokenQuantity = new Decimal(10);
-          } else if (pair === 'BNB-USD.P') {
-            // BNB: 0.05 BNB (~$35 at $700)
-            tokenQuantity = new Decimal(0.05);
-          } else if (pair === 'DOGE-USD.P') {
-            // DOGE: 80 DOGE (~$24 at $0.30)
-            tokenQuantity = new Decimal(80);
-          } else if (pair === 'LINK-USD.P') {
-            // LINK: 1 LINK (~$20 at $20)
-            tokenQuantity = new Decimal(1);
-          } else if (pair === 'SUI-USD.P') {
-            // SUI: 6 SUI (~$24 at $4)
-            tokenQuantity = new Decimal(6);
-          } else if (pair === 'HYPE-USD.P') {
-            // HYPE: Calculate $25 worth dynamically
-            const targetUsd = new Decimal(25);
-            const rawQuantity = targetUsd.dividedBy(signal.entryPrice);
+          if (signal.entryPrice.greaterThan(1000)) {
+            // BTC-like: 4 decimals (e.g., 0.0005 BTC)
+            tokenQuantity = rawQuantity.toDecimalPlaces(4);
+          } else if (signal.entryPrice.greaterThan(100)) {
+            // ETH/BNB-like: 2 decimals (e.g., 0.05 ETH)
             tokenQuantity = rawQuantity.toDecimalPlaces(2);
-          } else if (pair === 'NXP-USD.P') {
-            // NXP: Calculate $25 worth dynamically
-            const targetUsd = new Decimal(25);
-            const rawQuantity = targetUsd.dividedBy(signal.entryPrice);
-            tokenQuantity = rawQuantity.toDecimalPlaces(2);
+          } else if (signal.entryPrice.greaterThan(1)) {
+            // SOL/AVAX/LINK-like: 1 decimal (e.g., 3.5 SOL)
+            tokenQuantity = rawQuantity.toDecimalPlaces(1);
+          } else if (signal.entryPrice.greaterThan(0.1)) {
+            // DOGE/SUI-like: 0 decimals (e.g., 350 DOGE)
+            tokenQuantity = rawQuantity.toDecimalPlaces(0);
           } else {
-            // Safe default for any other pairs - $25 worth, rounded to 0.01
-            const targetUsd = new Decimal(25);
-            const rawQuantity = targetUsd.dividedBy(signal.entryPrice);
-            tokenQuantity = rawQuantity.toDecimalPlaces(2); // Round to 2 decimals as safe default
+            // Very low price tokens: 0 decimals
+            tokenQuantity = rawQuantity.toDecimalPlaces(0);
           }
 
           const actualUsdAmount = tokenQuantity.times(signal.entryPrice);
