@@ -346,6 +346,12 @@ export class BreakoutStrategy {
 
       // Only take signals that align with the trend
       if (breakout && volumeSpike && breakoutCandle) {
+        // CRITICAL: Reject ALL signals in SIDEWAYS markets - no directional conviction, high whipsaw risk
+        if (trend === 'SIDEWAYS') {
+          this.logger.info(`${symbol}: ${breakout} breakout REJECTED - market is SIDEWAYS (no directional trend)`);
+          return null;
+        }
+
         // BULLISH breakout: Only if we're in an UPTREND
         if (breakout === 'BULLISH' && trend === 'DOWNTREND') {
           this.logger.info(`${symbol}: BULLISH breakout REJECTED - trend is ${trend}, not UPTREND`);
