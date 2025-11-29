@@ -804,11 +804,16 @@ export class BreakoutStrategy {
       // Use real position mark price for accurate stop loss calculations
       const currentPrice = position.markPrice || position.entryPrice;
 
+      // Debug logging to diagnose trailing stop issues
+      this.logger.debug(`${symbol} trailing check: price=${currentPrice.toString()}, high=${trailing.high.toString()}, stop=${trailing.stop.toString()}, side=${signal.side}`);
+
       if (signal.side === OrderSide.BUY) {
         // Long position: trail stop upward
         if (currentPrice.greaterThan(trailing.high)) {
           const newHigh = currentPrice;
           const newStop = newHigh.times(1 - this.config.trailingStopPercent / 100);
+
+          this.logger.debug(`${symbol} price made new high! Old: ${trailing.high.toString()}, New: ${newHigh.toString()}, newStop: ${newStop.toString()}, oldStop: ${trailing.stop.toString()}`);
 
           if (newStop.greaterThan(trailing.stop)) {
             this.trailingStops.set(symbol, {
@@ -817,7 +822,7 @@ export class BreakoutStrategy {
             });
 
             this.logger.info(
-              `Updated trailing stop for ${symbol}: ${newStop.toFixed(2)} (high: ${newHigh.toFixed(2)})`
+              `✅ Updated trailing stop for ${symbol}: ${newStop.toFixed(2)} (high: ${newHigh.toFixed(2)})`
             );
 
             // NOTE: Not updating exchange STOP order (Enclave doesn't support them)
