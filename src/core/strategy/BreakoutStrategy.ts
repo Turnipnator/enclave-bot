@@ -40,6 +40,9 @@ export class BreakoutStrategy {
   // Stop Loss Cooldown: Prevent whipsaw re-entries after stop loss hits
   private stopLossCooldowns: Map<string, number> = new Map(); // symbol -> timestamp
   private readonly STOP_LOSS_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes - longer cooldown to prevent whipsaw death spirals
+  // Trailing Stop Health Monitoring: Track last successful check to detect failures
+  private lastTrailingStopCheck: Map<string, number> = new Map(); // symbol -> timestamp
+  private trailingStopFailureAlerted = false; // Prevent spam alerts
 
   constructor(client: EnclaveClient, strategyConfig: BreakoutConfig, telegram?: TelegramService) {
     this.client = client;
@@ -804,6 +807,9 @@ export class BreakoutStrategy {
       // Use real position mark price for accurate stop loss calculations
       const currentPrice = position.markPrice || position.entryPrice;
 
+      // Record successful check for health monitoring
+      this.lastTrailingStopCheck.set(symbol, Date.now());
+
       // Debug logging to diagnose trailing stop issues
       this.logger.debug(`${symbol} trailing check: price=${currentPrice.toString()}, high=${trailing.high.toString()}, stop=${trailing.stop.toString()}, side=${signal.side}`);
 
@@ -1005,6 +1011,51 @@ export class BreakoutStrategy {
     }
 
     this.logger.info(`Registered existing position: ${symbol} ${side} @ ${entryPrice.toString()}, TP: ${signal.takeProfit?.toString() || 'none'}, SL: ${signal.stopLoss.toString()}`);
+  }
+
+  /**
+   * Health check for trailing stops - detects if they've stopped working
+   * Call this periodically (e.g., every 60 seconds) to monitor health
+   * Sends Telegram alert if trailing stops haven't been checked recently
+   */
+  public async checkTrailingStopHealth(): Promise<void> {
+    const now = Date.now();
+    const STALE_THRESHOLD_MS = 60 * 1000; // 60 seconds - should check every 5s, so 60s means problem
+
+    // Check each active position
+    for (const [symbol] of this.activeSignals.entries()) {
+      const lastCheck = this.lastTrailingStopCheck.get(symbol);
+
+      if (!lastCheck) {
+        // Position has never been checked - this is bad!
+        if (!this.trailingStopFailureAlerted) {
+          const message = `🚨 CRITICAL: Trailing stop for ${symbol} has NEVER been checked! Position is unprotected!`;
+          this.logger.error(message);
+          if (this.telegram) {
+            await this.telegram.sendMessage(message);
+          }
+          this.trailingStopFailureAlerted = true;
+        }
+        continue;
+      }
+
+      const timeSinceCheck = now - lastCheck;
+      if (timeSinceCheck > STALE_THRESHOLD_MS) {
+        // Trailing stop hasn't been checked in over 60 seconds - something is wrong
+        if (!this.trailingStopFailureAlerted) {
+          const minutesStale = Math.round(timeSinceCheck / 60000);
+          const message = `🚨 CRITICAL: Trailing stops have FAILED!\n\n${symbol} not checked for ${minutesStale} minutes.\n\nYour positions are UNPROTECTED.\n\nRestart the bot immediately!`;
+          this.logger.error(message);
+          if (this.telegram) {
+            await this.telegram.sendMessage(message);
+          }
+          this.trailingStopFailureAlerted = true;
+        }
+      } else {
+        // Trailing stops are working - reset alert flag
+        this.trailingStopFailureAlerted = false;
+      }
+    }
   }
 
   public clearHistory(): void {

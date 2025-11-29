@@ -29,7 +29,15 @@
       "Bash(pm2 info:*)",
       "Bash(git stash:*)",
       "Bash(ssh:*)",
-      "Bash(test:*)"
+      "Bash(test:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(rsync:*)",
+      "Bash(npm run build:*)",
+      "Bash(docker compose:*)",
+      "Bash(cat:*)",
+      "Bash(npx pnpm build)"
     ],
     "deny": [],
     "ask": []

@@ -104,6 +104,7 @@ class TradingBot implements BotStatusProvider {
       this.startPriceUpdateLoop();
       this.startStaleOrderCleanup();
       this.startHistoryRefreshLoop();
+      this.startTrailingStopHealthCheck();
 
       logger.info('Trading bot started successfully');
 
@@ -403,6 +404,20 @@ class TradingBot implements BotStatusProvider {
         logger.error({ error }, 'Error refreshing price history');
       }
     }, 60 * 60 * 1000); // Run every hour
+  }
+
+  private startTrailingStopHealthCheck(): void {
+    // Monitor trailing stop health every 60 seconds
+    // Sends Telegram alert if trailing stops fail (critical for protecting positions)
+    setInterval(async () => {
+      if (!this.running) return;
+
+      try {
+        await this.breakoutStrategy.checkTrailingStopHealth();
+      } catch (error) {
+        logger.error({ error }, 'Error checking trailing stop health');
+      }
+    }, 60 * 1000); // Check every 60 seconds
   }
 
   private startStaleOrderCleanup(): void {
