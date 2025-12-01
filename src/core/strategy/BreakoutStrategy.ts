@@ -51,6 +51,33 @@ export class BreakoutStrategy {
     this.logger = pino({ name: 'BreakoutStrategy', level: config.logLevel });
   }
 
+  /**
+   * Get trailing stop percentage based on 90-day volatility analysis
+   * Tiered stops to match each pair's ATR (Average True Range):
+   * - Low volatility (BTC/ETH/BNB): 6% - ATR ~3-5.5%
+   * - Medium volatility (SOL/XRP): 8% - ATR ~6-6.5%
+   * - High volatility (DOGE/LINK/AVAX/SUI): 10% - ATR ~7.5-8.5%
+   */
+  private getTrailingStopPercent(symbol: string): number {
+    // Low volatility tier - 6% stop (~1.5x their ATR)
+    if (symbol === 'BTC-USD.P' || symbol === 'ETH-USD.P' || symbol === 'BNB-USD.P') {
+      return 6;
+    }
+
+    // Medium volatility tier - 8% stop (~1.3x their ATR)
+    if (symbol === 'SOL-USD.P' || symbol === 'XRP-USD.P') {
+      return 8;
+    }
+
+    // High volatility tier - 10% stop (~1.3x their ATR)
+    if (symbol === 'DOGE-USD.P' || symbol === 'LINK-USD.P' || symbol === 'AVAX-USD.P' || symbol === 'SUI-USD.P') {
+      return 10;
+    }
+
+    // Default to config value for unknown pairs
+    return this.config.trailingStopPercent;
+  }
+
   private roundToIncrement(price: Decimal, symbol: string): Decimal {
     let increment: number;
 
@@ -389,10 +416,11 @@ export class BreakoutStrategy {
         // Use current price for entry (we're entering now, not at the breakout candle)
         // But increase confidence if we found the breakout in a recent candle
         const entryPrice = currentPrice;
+        const trailingStopPct = this.getTrailingStopPercent(symbol);
         const stopLoss =
           breakout === 'BULLISH'
-            ? entryPrice.times(1 - this.config.trailingStopPercent / 100)
-            : entryPrice.times(1 + this.config.trailingStopPercent / 100);
+            ? entryPrice.times(1 - trailingStopPct / 100)
+            : entryPrice.times(1 + trailingStopPct / 100);
 
         // Calculate RSI for logging (not used as filter - trend + CHOPPY filters are sufficient)
         const rsi = TechnicalIndicators.calculateRSI(history);
@@ -586,7 +614,7 @@ export class BreakoutStrategy {
             // Additional confirmation: price structure should show LOWER_LOWS
             if (priceStructure === 'LOWER_LOWS') {
               const entryPrice = currentPrice;
-              const stopLoss = entryPrice.times(1 + this.config.trailingStopPercent / 100);
+              const stopLoss = entryPrice.times(1 + this.getTrailingStopPercent(symbol) / 100);
 
               // Calculate RSI for logging only (no filter for trend-following)
               const rsi = TechnicalIndicators.calculateRSI(history);
@@ -624,7 +652,7 @@ export class BreakoutStrategy {
             // Additional confirmation: price structure should show HIGHER_HIGHS
             if (priceStructure === 'HIGHER_HIGHS') {
               const entryPrice = currentPrice;
-              const stopLoss = entryPrice.times(1 - this.config.trailingStopPercent / 100);
+              const stopLoss = entryPrice.times(1 - this.getTrailingStopPercent(symbol) / 100);
 
               // Calculate RSI for logging only (no filter for trend-following)
               const rsi = TechnicalIndicators.calculateRSI(history);
@@ -817,7 +845,7 @@ export class BreakoutStrategy {
         // Long position: trail stop upward
         if (currentPrice.greaterThan(trailing.high)) {
           const newHigh = currentPrice;
-          const newStop = newHigh.times(1 - this.config.trailingStopPercent / 100);
+          const newStop = newHigh.times(1 - this.getTrailingStopPercent(symbol) / 100);
 
           this.logger.debug(`${symbol} price made new high! Old: ${trailing.high.toString()}, New: ${newHigh.toString()}, newStop: ${newStop.toString()}, oldStop: ${trailing.stop.toString()}`);
 
@@ -848,7 +876,7 @@ export class BreakoutStrategy {
         // Short position: trail stop downward
         if (currentPrice.lessThan(trailing.high)) {
           const newLow = currentPrice;
-          const newStop = newLow.times(1 + this.config.trailingStopPercent / 100);
+          const newStop = newLow.times(1 + this.getTrailingStopPercent(symbol) / 100);
 
           if (newStop.lessThan(trailing.stop)) {
             this.trailingStops.set(symbol, {
@@ -952,14 +980,15 @@ export class BreakoutStrategy {
   }
 
   public async registerExistingPosition(symbol: string, side: OrderSide, entryPrice: Decimal, quantity: Decimal): Promise<void> {
-    // Create a signal for the existing position
+    // Create a signal for the existing position using tiered trailing stop
+    const trailingStopPct = this.getTrailingStopPercent(symbol);
     const signal: Signal = {
       symbol,
       side,
       entryPrice,
       stopLoss: side === OrderSide.BUY
-        ? entryPrice.times(1 - this.config.trailingStopPercent / 100)
-        : entryPrice.times(1 + this.config.trailingStopPercent / 100),
+        ? entryPrice.times(1 - trailingStopPct / 100)
+        : entryPrice.times(1 + trailingStopPct / 100),
       takeProfit: this.config.takeProfitPercent
         ? (side === OrderSide.BUY
             ? entryPrice.times(1 + this.config.takeProfitPercent / 100)
@@ -1010,7 +1039,7 @@ export class BreakoutStrategy {
       this.logger.error({ error }, `Failed to place protective orders for existing position ${symbol}`);
     }
 
-    this.logger.info(`Registered existing position: ${symbol} ${side} @ ${entryPrice.toString()}, TP: ${signal.takeProfit?.toString() || 'none'}, SL: ${signal.stopLoss.toString()}`);
+    this.logger.info(`Registered existing position: ${symbol} ${side} @ ${entryPrice.toString()}, SL: ${signal.stopLoss.toString()} (${trailingStopPct}% tiered stop)`);
   }
 
   /**
