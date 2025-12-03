@@ -44,6 +44,11 @@ export class BreakoutStrategy {
   private lastTrailingStopCheck: Map<string, number> = new Map(); // symbol -> timestamp
   private trailingStopFailureAlerted = false; // Prevent spam alerts
 
+  // Partial Profit Taking: Track which positions have taken partial profits
+  private partialProfitTaken: Map<string, boolean> = new Map(); // symbol -> has taken partial
+  private readonly PARTIAL_PROFIT_THRESHOLD = 3; // Take partial at 3% profit
+  private readonly PARTIAL_CLOSE_PERCENT = 75; // Close 75% of position
+
   constructor(client: EnclaveClient, strategyConfig: BreakoutConfig, telegram?: TelegramService) {
     this.client = client;
     this.config = strategyConfig;
@@ -795,6 +800,7 @@ export class BreakoutStrategy {
 
         this.activeSignals.delete(symbol);
         this.trailingStops.delete(symbol);
+        this.partialProfitTaken.delete(symbol);
         return;
       }
 
@@ -829,6 +835,14 @@ export class BreakoutStrategy {
           }
         }
 
+        // Check for partial profit taking (LONG: price above entry)
+        if (!this.partialProfitTaken.get(symbol)) {
+          const profitPercent = currentPrice.minus(signal.entryPrice).dividedBy(signal.entryPrice).times(100).toNumber();
+          if (profitPercent >= this.PARTIAL_PROFIT_THRESHOLD) {
+            await this.closePartialPosition(symbol, position, profitPercent);
+          }
+        }
+
         // Check if stop hit (use < not <=)
         if (currentPrice.lessThan(trailing.stop)) {
           await this.closePosition(symbol, 'Stop Loss Hit');
@@ -858,6 +872,14 @@ export class BreakoutStrategy {
           }
         }
 
+        // Check for partial profit taking (SHORT: price below entry)
+        if (!this.partialProfitTaken.get(symbol)) {
+          const profitPercent = signal.entryPrice.minus(currentPrice).dividedBy(signal.entryPrice).times(100).toNumber();
+          if (profitPercent >= this.PARTIAL_PROFIT_THRESHOLD) {
+            await this.closePartialPosition(symbol, position, profitPercent);
+          }
+        }
+
         // Check if stop hit (use > not >=)
         if (currentPrice.greaterThan(trailing.stop)) {
           await this.closePosition(symbol, 'Stop Loss Hit');
@@ -870,6 +892,58 @@ export class BreakoutStrategy {
       }
     } catch (error) {
       this.logger.error({ error, symbol }, `Failed to update trailing stop for ${symbol}`);
+    }
+  }
+
+  /**
+   * Close a partial position (75%) and let the remaining 25% trail
+   */
+  private async closePartialPosition(symbol: string, position: { side: OrderSide; quantity: Decimal; entryPrice: Decimal; markPrice: Decimal }, profitPercent: number): Promise<void> {
+    try {
+      const closeQuantity = position.quantity.times(this.PARTIAL_CLOSE_PERCENT / 100).floor();
+      const remainingQuantity = position.quantity.minus(closeQuantity);
+
+      if (closeQuantity.lessThanOrEqualTo(0)) {
+        this.logger.warn(`${symbol}: Partial close quantity too small, skipping`);
+        return;
+      }
+
+      const closeSide = position.side === OrderSide.BUY ? OrderSide.SELL : OrderSide.BUY;
+      const closePrice = position.markPrice || position.entryPrice;
+
+      // Calculate profit on partial close
+      const partialPnl = position.side === OrderSide.BUY
+        ? closePrice.minus(position.entryPrice).times(closeQuantity).toNumber()
+        : position.entryPrice.minus(closePrice).times(closeQuantity).toNumber();
+
+      this.logger.info(`💰 Taking ${this.PARTIAL_CLOSE_PERCENT}% partial profit on ${symbol}: closing ${closeQuantity.toString()} @ ${closePrice.toString()}, P&L: $${partialPnl.toFixed(2)}, remaining: ${remainingQuantity.toString()}`);
+
+      // Place reduce-only market order for partial close
+      await this.client.addOrder(
+        symbol,
+        closeSide,
+        closeQuantity,
+        OrderType.MARKET
+      );
+
+      // Mark partial profit as taken
+      this.partialProfitTaken.set(symbol, true);
+
+      // Send Telegram notification
+      if (this.telegram) {
+        await this.telegram.sendMessage(
+          `💰 *Partial Profit Taken*\n` +
+          `Symbol: ${symbol}\n` +
+          `Closed: ${this.PARTIAL_CLOSE_PERCENT}% (${closeQuantity.toString()})\n` +
+          `At: ${profitPercent.toFixed(1)}% profit\n` +
+          `P&L: $${partialPnl.toFixed(2)}\n` +
+          `Remaining: ${remainingQuantity.toString()} (25% runner)`
+        );
+      }
+
+      this.logger.info(`✅ Partial profit taken for ${symbol}, ${remainingQuantity.toString()} still trailing`);
+    } catch (error) {
+      this.logger.error({ error, symbol }, `Failed to take partial profit for ${symbol}`);
     }
   }
 
@@ -936,6 +1010,7 @@ export class BreakoutStrategy {
 
       this.activeSignals.delete(symbol);
       this.trailingStops.delete(symbol);
+      this.partialProfitTaken.delete(symbol);
     } catch (error) {
       this.logger.error({ error, symbol }, `Failed to close position for ${symbol}`);
     }
