@@ -311,27 +311,9 @@ export class BreakoutStrategy {
 
         // Found a breakout OR large move with volume confirmation in recent candles
         if (signalType && volumeOK) {
-          // CRITICAL: Trend alignment logic
-          // - Cumulative moves: Allow SIDEWAYS (slow grinds can happen during consolidation)
-          // - Breakouts/Large moves: Require strict UPTREND/DOWNTREND (prevent counter-trend bounces)
-          let trendAligned = false;
-
-          if (cumulativeMoveType !== null) {
-            // Cumulative slow grinds: Allow SIDEWAYS or aligned trend
-            trendAligned = (signalType === 'BULLISH' && (trend === 'UPTREND' || trend === 'SIDEWAYS')) ||
-                          (signalType === 'BEARISH' && (trend === 'DOWNTREND' || trend === 'SIDEWAYS'));
-            this.logger.debug(`${symbol}: Cumulative move ${signalType} in ${trend} market - ${trendAligned ? 'ALLOWED' : 'REJECTED'}`);
-          } else {
-            // Breakouts and large single-candle moves: Strict trend alignment required
-            trendAligned = (signalType === 'BULLISH' && trend === 'UPTREND') ||
-                          (signalType === 'BEARISH' && trend === 'DOWNTREND');
-            this.logger.debug(`${symbol}: Breakout/large move ${signalType} in ${trend} market - ${trendAligned ? 'ALLOWED' : 'REJECTED'}`);
-          }
-
-          if (!trendAligned) {
-            this.logger.debug(`${symbol}: ${signalType} signal found in candle ${i} but trend is ${trend} - skipping counter-trend move`);
-            continue; // Keep looking for trend-aligned signals
-          }
+          // NOTE: Trend alignment removed - let breakouts speak for themselves
+          // Price action + volume is sufficient confirmation
+          this.logger.debug(`${symbol}: ${signalType} signal found in ${trend} market - trend requirement DISABLED`);
 
           // For BEARISH: check if trend is still down (current < resistance)
           // For BULLISH: check if trend is still up (current > support)
@@ -374,27 +356,11 @@ export class BreakoutStrategy {
         recentCandlesChecked: candleLookback
       }));
 
-      // Only take signals that align with the trend
+      // Take breakout signals regardless of MA trend - price action + volume is king
       if (breakout && volumeSpike && breakoutCandle) {
-        // CRITICAL: Reject ALL signals in SIDEWAYS markets - no directional conviction, high whipsaw risk
-        if (trend === 'SIDEWAYS') {
-          this.logger.info(`${symbol}: ${breakout} breakout REJECTED - market is SIDEWAYS (no directional trend)`);
-          return null;
-        }
+        this.logger.info(`${symbol}: ${breakout} breakout detected in ${trend} market (trend filter DISABLED)`);
 
-        // BULLISH breakout: Only if we're in an UPTREND
-        if (breakout === 'BULLISH' && trend === 'DOWNTREND') {
-          this.logger.info(`${symbol}: BULLISH breakout REJECTED - trend is ${trend}, not UPTREND`);
-          return null;
-        }
-
-        // BEARISH breakout: Only if we're in a DOWNTREND
-        if (breakout === 'BEARISH' && trend === 'UPTREND') {
-          this.logger.info(`${symbol}: BEARISH breakout REJECTED - trend is ${trend}, not DOWNTREND`);
-          return null;
-        }
-
-        // Additional confirmation: price structure should match trend
+        // Price structure filters still apply - these catch obvious counter-moves
         if (breakout === 'BULLISH' && priceStructure === 'LOWER_LOWS') {
           this.logger.info(`${symbol}: BULLISH breakout REJECTED - price structure shows LOWER_LOWS`);
           return null;

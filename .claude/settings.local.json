@@ -37,7 +37,8 @@
       "Bash(npm run build:*)",
       "Bash(docker compose:*)",
       "Bash(cat:*)",
-      "Bash(npx pnpm build)"
+      "Bash(npx pnpm build)",
+      "Bash(npx tsc:*)"
     ],
     "deny": [],
     "ask": []
