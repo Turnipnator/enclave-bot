@@ -839,7 +839,10 @@ export class BreakoutStrategy {
         if (!this.partialProfitTaken.get(symbol)) {
           const profitPercent = currentPrice.minus(signal.entryPrice).dividedBy(signal.entryPrice).times(100).toNumber();
           if (profitPercent >= this.PARTIAL_PROFIT_THRESHOLD) {
+            this.logger.info(`💰 ${symbol} hit ${profitPercent.toFixed(2)}% profit - triggering partial take!`);
             await this.closePartialPosition(symbol, position, profitPercent);
+          } else if (profitPercent > 0) {
+            this.logger.debug(`${symbol} profit check: ${profitPercent.toFixed(2)}% (need ${this.PARTIAL_PROFIT_THRESHOLD}% for partial)`);
           }
         }
 
@@ -876,7 +879,10 @@ export class BreakoutStrategy {
         if (!this.partialProfitTaken.get(symbol)) {
           const profitPercent = signal.entryPrice.minus(currentPrice).dividedBy(signal.entryPrice).times(100).toNumber();
           if (profitPercent >= this.PARTIAL_PROFIT_THRESHOLD) {
+            this.logger.info(`💰 ${symbol} hit ${profitPercent.toFixed(2)}% profit - triggering partial take!`);
             await this.closePartialPosition(symbol, position, profitPercent);
+          } else if (profitPercent > 0) {
+            this.logger.debug(`${symbol} profit check: ${profitPercent.toFixed(2)}% (need ${this.PARTIAL_PROFIT_THRESHOLD}% for partial)`);
           }
         }
 
