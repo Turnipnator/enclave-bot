@@ -39,6 +39,16 @@ coverage/
 tmp/
 temp/
 
+# Data files (persisted state)
+data/
+*.json.bak
+
+# Secrets/credentials that might be created
+credentials.json
+secrets.json
+*.pem
+*.key
+
 # Test/debug scripts (don't commit temporary test files)
 test*.js
 check*.js
