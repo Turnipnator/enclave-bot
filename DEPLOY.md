@@ -55,8 +55,8 @@ ENCLAVE_SUBACCOUNT=botman
 TRADING_MODE=live  # Change from 'paper' to 'live' for real trading
 
 # Telegram Bot - YOUR ACTUAL CREDENTIALS
-TELEGRAM_BOT_TOKEN=8446361304:AAFSGWyFuEG9_CZcEJFvWdrz_CNEB-CSi3I
-TELEGRAM_CHAT_ID=520315014
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+TELEGRAM_CHAT_ID=your_telegram_chat_id_here
 TELEGRAM_ENABLED=true
 ```
 
