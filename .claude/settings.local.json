@@ -38,7 +38,13 @@
       "Bash(docker compose:*)",
       "Bash(cat:*)",
       "Bash(npx pnpm build)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(pgrep:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(xargs ls:*)",
+      "Bash(curl:*)",
+      "Bash(python3:*)"
     ],
     "deny": [],
     "ask": []

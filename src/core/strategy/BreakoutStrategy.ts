@@ -1,11 +1,20 @@
 import Decimal from 'decimal.js';
 import pino from 'pino';
+import * as fs from 'fs';
+import * as path from 'path';
 import { EnclaveClient } from '../exchange/EnclaveClient';
 import { OrderSide, OrderType } from '../exchange/types';
 import { TechnicalIndicators, PriceData } from '../indicators/TechnicalIndicators';
 import { config } from '../../config/config';
 import { HealthCheck } from '../../utils/healthCheck';
 import { TelegramService } from '../../services/telegram/TelegramService';
+
+// Persisted trailing stop state interface
+interface PersistedTrailingStop {
+  high: string;
+  stop: string;
+  updatedAt: string;
+}
 
 export interface BreakoutConfig {
   lookbackPeriod: number;
@@ -49,11 +58,78 @@ export class BreakoutStrategy {
   private readonly PARTIAL_PROFIT_THRESHOLD = 3; // Take partial at 3% profit
   private readonly PARTIAL_CLOSE_PERCENT = 75; // Close 75% of position
 
+  // Trailing Stop Persistence: File path for persisting trailing stop state across restarts
+  private readonly TRAILING_STOPS_FILE = path.join(process.cwd(), 'data', 'trailing_stops.json');
+
   constructor(client: EnclaveClient, strategyConfig: BreakoutConfig, telegram?: TelegramService) {
     this.client = client;
     this.config = strategyConfig;
     this.telegram = telegram;
     this.logger = pino({ name: 'BreakoutStrategy', level: config.logLevel });
+
+    // Load persisted trailing stops on startup
+    this.loadTrailingStops();
+  }
+
+  /**
+   * Save trailing stop state to disk for persistence across restarts
+   */
+  private saveTrailingStops(): void {
+    try {
+      const dataDir = path.dirname(this.TRAILING_STOPS_FILE);
+      if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir, { recursive: true });
+      }
+
+      const state: Record<string, PersistedTrailingStop> = {};
+      this.trailingStops.forEach((value, symbol) => {
+        state[symbol] = {
+          high: value.high.toString(),
+          stop: value.stop.toString(),
+          updatedAt: new Date().toISOString(),
+        };
+      });
+
+      fs.writeFileSync(this.TRAILING_STOPS_FILE, JSON.stringify(state, null, 2));
+      this.logger.debug(`Saved trailing stops to disk: ${Object.keys(state).length} positions`);
+    } catch (error) {
+      this.logger.error({ error }, 'Failed to save trailing stops to disk');
+    }
+  }
+
+  /**
+   * Load trailing stop state from disk on startup
+   */
+  private loadTrailingStops(): void {
+    try {
+      if (!fs.existsSync(this.TRAILING_STOPS_FILE)) {
+        this.logger.info('No persisted trailing stops found - starting fresh');
+        return;
+      }
+
+      const data = fs.readFileSync(this.TRAILING_STOPS_FILE, 'utf-8');
+      const state: Record<string, PersistedTrailingStop> = JSON.parse(data);
+
+      for (const [symbol, value] of Object.entries(state)) {
+        this.trailingStops.set(symbol, {
+          high: new Decimal(value.high),
+          stop: new Decimal(value.stop),
+        });
+        this.logger.info(`📁 Loaded persisted trailing stop for ${symbol}: high=${value.high}, stop=${value.stop}`);
+      }
+
+      this.logger.info(`Loaded ${Object.keys(state).length} trailing stops from disk`);
+    } catch (error) {
+      this.logger.error({ error }, 'Failed to load trailing stops from disk - starting fresh');
+    }
+  }
+
+  /**
+   * Remove a trailing stop from persistence (when position is closed)
+   */
+  private removePersistedTrailingStop(symbol: string): void {
+    this.trailingStops.delete(symbol);
+    this.saveTrailingStops();
   }
 
   /**
@@ -772,6 +848,9 @@ export class BreakoutStrategy {
         });
       }
 
+      // Persist the new trailing stop to disk
+      this.saveTrailingStops();
+
     } catch (error) {
       this.logger.error({ error, signal }, `Failed to execute signal for ${signal.symbol}`);
     }
@@ -799,7 +878,7 @@ export class BreakoutStrategy {
         this.logger.info(`⏱️  Stop loss cooldown activated for ${symbol} (closed externally) - no re-entry for ${this.STOP_LOSS_COOLDOWN_MS / 60000} minutes`);
 
         this.activeSignals.delete(symbol);
-        this.trailingStops.delete(symbol);
+        this.removePersistedTrailingStop(symbol);
         this.partialProfitTaken.delete(symbol);
         return;
       }
@@ -830,6 +909,9 @@ export class BreakoutStrategy {
             this.logger.info(
               `✅ Updated trailing stop for ${symbol}: ${newStop.toFixed(2)} (high: ${newHigh.toFixed(2)})`
             );
+
+            // Persist the updated trailing stop to disk
+            this.saveTrailingStops();
 
             // NOTE: Not updating exchange STOP order (Enclave doesn't support them)
           }
@@ -870,6 +952,9 @@ export class BreakoutStrategy {
             this.logger.info(
               `Updated trailing stop for ${symbol}: ${newStop.toFixed(2)} (low: ${newLow.toFixed(2)})`
             );
+
+            // Persist the updated trailing stop to disk
+            this.saveTrailingStops();
 
             // NOTE: Not updating exchange STOP order (Enclave doesn't support them)
           }
@@ -1015,7 +1100,7 @@ export class BreakoutStrategy {
       }
 
       this.activeSignals.delete(symbol);
-      this.trailingStops.delete(symbol);
+      this.removePersistedTrailingStop(symbol);
       this.partialProfitTaken.delete(symbol);
     } catch (error) {
       this.logger.error({ error, symbol }, `Failed to close position for ${symbol}`);
@@ -1047,11 +1132,23 @@ export class BreakoutStrategy {
 
     this.activeSignals.set(symbol, signal);
 
-    // Initialize trailing stop at entry price
-    this.trailingStops.set(symbol, {
-      high: entryPrice,
-      stop: signal.stopLoss,
-    });
+    // Check if we have a persisted trailing stop from before restart
+    const existingTrailing = this.trailingStops.get(symbol);
+    if (existingTrailing) {
+      // Use the persisted high (don't reset to entry price!)
+      this.logger.info(`📁 Using persisted trailing stop for ${symbol}: high=${existingTrailing.high.toString()}, stop=${existingTrailing.stop.toString()}`);
+
+      // Update the signal's stopLoss to match the persisted stop level
+      signal.stopLoss = existingTrailing.stop;
+    } else {
+      // No persisted state - initialize trailing stop at entry price
+      this.trailingStops.set(symbol, {
+        high: entryPrice,
+        stop: signal.stopLoss,
+      });
+      this.logger.info(`Initialized new trailing stop for ${symbol} at entry price: ${entryPrice.toString()}`);
+      this.saveTrailingStops();
+    }
 
     // Cancel any existing orders for this symbol first
     try {
