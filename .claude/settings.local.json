@@ -44,7 +44,8 @@
       "Bash(find:*)",
       "Bash(xargs ls:*)",
       "Bash(curl:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(git log:*)"
     ],
     "deny": [],
     "ask": []

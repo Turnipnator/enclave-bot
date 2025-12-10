@@ -13,6 +13,7 @@ import { TelegramService } from '../../services/telegram/TelegramService';
 interface PersistedTrailingStop {
   high: string;
   stop: string;
+  partialProfitTaken: boolean;
   updatedAt: string;
 }
 
@@ -86,6 +87,7 @@ export class BreakoutStrategy {
         state[symbol] = {
           high: value.high.toString(),
           stop: value.stop.toString(),
+          partialProfitTaken: this.partialProfitTaken.get(symbol) || false,
           updatedAt: new Date().toISOString(),
         };
       });
@@ -115,7 +117,13 @@ export class BreakoutStrategy {
           high: new Decimal(value.high),
           stop: new Decimal(value.stop),
         });
-        this.logger.info(`📁 Loaded persisted trailing stop for ${symbol}: high=${value.high}, stop=${value.stop}`);
+        // Restore partial profit taken state
+        if (value.partialProfitTaken) {
+          this.partialProfitTaken.set(symbol, true);
+          this.logger.info(`📁 Loaded persisted trailing stop for ${symbol}: high=${value.high}, stop=${value.stop}, partialTaken=YES`);
+        } else {
+          this.logger.info(`📁 Loaded persisted trailing stop for ${symbol}: high=${value.high}, stop=${value.stop}, partialTaken=NO`);
+        }
       }
 
       this.logger.info(`Loaded ${Object.keys(state).length} trailing stops from disk`);
@@ -1017,8 +1025,9 @@ export class BreakoutStrategy {
         OrderType.MARKET
       );
 
-      // Mark partial profit as taken
+      // Mark partial profit as taken and persist
       this.partialProfitTaken.set(symbol, true);
+      this.saveTrailingStops(); // Persist the partial profit taken flag
 
       // Send Telegram notification
       if (this.telegram) {
