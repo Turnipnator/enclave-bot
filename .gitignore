@@ -49,6 +49,9 @@ secrets.json
 *.pem
 *.key
 
+# Local Claude notes (contains VPS credentials)
+claude_local.md
+
 # Test/debug scripts (don't commit temporary test files)
 test*.js
 check*.js

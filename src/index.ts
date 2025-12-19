@@ -287,8 +287,9 @@ class TradingBot implements BotStatusProvider {
     for (const pair of config.tradingPairs) {
       try {
         // Try to load historical data from Binance
+        // Need 250 candles for EMA stack (200 for EMA200 + 50 buffer for calculations)
         logger.info(`Loading historical data for ${pair} from Binance...`);
-        const candles = await binanceService.getHistoricalCandles(pair, '5m', 100);
+        const candles = await binanceService.getHistoricalCandles(pair, '5m', 250);
 
         if (candles.length > 0) {
           // Convert Binance candles to PriceData format
@@ -380,7 +381,8 @@ class TradingBot implements BotStatusProvider {
 
         for (const pair of config.tradingPairs) {
           try {
-            const candles = await binanceService.getHistoricalCandles(pair, '5m', 100);
+            // 250 candles for EMA stack (200 for EMA200 + buffer)
+            const candles = await binanceService.getHistoricalCandles(pair, '5m', 250);
 
             if (candles.length > 0) {
               const priceData = candles.map(candle => ({
@@ -550,7 +552,7 @@ class TradingBot implements BotStatusProvider {
         }
 
         // DISABLED: updatePriceHistory() corrupts data by adding 24h summary as 5-min candles
-        // Bot uses initial 100 candles from Binance which is sufficient (5 hours of 5-min data)
+        // Bot uses 250 candles from Binance for momentum strategy (20+ hours of 5-min data)
         // logger.debug(`Updating price history for ${pair}...`);
         // await this.breakoutStrategy.updatePriceHistory(pair);
 
@@ -737,6 +739,7 @@ class TradingBot implements BotStatusProvider {
       side: string;
       quantity: string;
       entryPrice: string;
+      markPrice: string;
       unrealizedPnl: string;
     }>;
     dailyPnl: number;
@@ -765,6 +768,7 @@ class TradingBot implements BotStatusProvider {
           side: p.side,
           quantity: p.quantity.toFixed(4),
           entryPrice: p.entryPrice.toFixed(2),
+          markPrice: p.markPrice.toFixed(2),
           unrealizedPnl: p.unrealizedPnl.toFixed(2),
         })),
         dailyPnl: metrics.dailyPnl.toNumber(),

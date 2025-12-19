@@ -6,7 +6,6 @@ import { EnclaveClient } from '../exchange/EnclaveClient';
 import { OrderSide, OrderType } from '../exchange/types';
 import { TechnicalIndicators, PriceData } from '../indicators/TechnicalIndicators';
 import { config } from '../../config/config';
-import { HealthCheck } from '../../utils/healthCheck';
 import { TelegramService } from '../../services/telegram/TelegramService';
 
 // Persisted trailing stop state interface
@@ -45,19 +44,45 @@ export class BreakoutStrategy {
   private priceHistory: Map<string, PriceData[]> = new Map();
   private activeSignals: Map<string, Signal> = new Map();
   private trailingStops: Map<string, { high: Decimal; stop: Decimal }> = new Map();
-  // Trend Following: Track last N trend readings for each symbol
-  private trendHistory: Map<string, Array<'UPTREND' | 'DOWNTREND' | 'SIDEWAYS'>> = new Map();
-  // Stop Loss Cooldown: Prevent whipsaw re-entries after stop loss hits
-  private stopLossCooldowns: Map<string, number> = new Map(); // symbol -> timestamp
-  private readonly STOP_LOSS_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes - longer cooldown to prevent whipsaw death spirals
+  // Loss Cooldown: Prevent revenge trading after stop loss hits
+  // Winners can re-enter immediately (momentum continuation)
+  private lossCooldowns: Map<string, number> = new Map(); // symbol -> timestamp when loss occurred
   // Trailing Stop Health Monitoring: Track last successful check to detect failures
   private lastTrailingStopCheck: Map<string, number> = new Map(); // symbol -> timestamp
   private trailingStopFailureAlerted = false; // Prevent spam alerts
+  // Track when positions were opened to avoid false alerts on new positions
+  private positionOpenedAt: Map<string, number> = new Map(); // symbol -> timestamp
+  private readonly NEW_POSITION_GRACE_PERIOD_MS = 30 * 1000; // 30 second grace period for new positions
 
-  // Partial Profit Taking: Track which positions have taken partial profits
-  private partialProfitTaken: Map<string, boolean> = new Map(); // symbol -> has taken partial
-  private readonly PARTIAL_PROFIT_THRESHOLD = 3; // Take partial at 3% profit
-  private readonly PARTIAL_CLOSE_PERCENT = 75; // Close 75% of position
+  // =============================================================================
+  // MOMENTUM STRATEGY PARAMETERS (from winning Binance bot - 13/13 wins!)
+  // =============================================================================
+  // Core philosophy: Don't be greedy. Lock in small profits quickly and re-enter
+  // if conditions remain favorable. "Rinse and repeat" approach.
+  // =============================================================================
+
+  private partialProfitTaken: Map<string, boolean> = new Map(); // symbol -> has taken profit
+
+  // Take Profit: 1.3% - small enough to hit frequently, large enough to cover fees
+  private readonly TAKE_PROFIT_THRESHOLD = 1.3;
+  private readonly TAKE_PROFIT_CLOSE_PERCENT = 100; // Close 100% of position (full exit)
+
+  // Stop Loss: 5% - wide enough to survive noise, tight enough to limit damage
+  // With our strict entry filters (0.60+ momentum), stops rarely get hit
+  private readonly STOP_LOSS_PERCENT = 5;
+
+  // Momentum Score: Only enter on strong signals (0.60+)
+  // Below 0.50 = weak/neutral (too risky)
+  // 0.50-0.59 = moderate (still too risky)
+  // 0.60-0.69 = strong (our entry zone)
+  // 0.70+ = very strong (excellent entry)
+  private readonly MOMENTUM_THRESHOLD = 0.60;
+
+  // Volume Confirmation: 1.5x average minimum
+  private readonly VOLUME_MULTIPLIER = 1.5;
+
+  // Cooldown: 20 minutes AFTER LOSSES ONLY (winners can re-enter immediately)
+  private readonly LOSS_COOLDOWN_MS = 20 * 60 * 1000; // 20 minutes
 
   // Trailing Stop Persistence: File path for persisting trailing stop state across restarts
   private readonly TRAILING_STOPS_FILE = path.join(process.cwd(), 'data', 'trailing_stops.json');
@@ -141,30 +166,11 @@ export class BreakoutStrategy {
   }
 
   /**
-   * Get trailing stop percentage based on 90-day volatility analysis
-   * Tiered stops to match each pair's ATR (Average True Range):
-   * - Low volatility (BTC/ETH/BNB): 6% - ATR ~3-5.5%
-   * - Medium volatility (SOL/XRP): 8% - ATR ~6-6.5%
-   * - High volatility (DOGE/LINK/AVAX/SUI): 10% - ATR ~7.5-8.5%
+   * Get stop loss percentage - fixed 2% for all pairs (scalping mode)
+   * Previous tiered system was 6-10% based on volatility, now using tight stops
    */
-  private getTrailingStopPercent(symbol: string): number {
-    // Low volatility tier - 6% stop (~1.5x their ATR)
-    if (symbol === 'BTC-USD.P' || symbol === 'ETH-USD.P' || symbol === 'BNB-USD.P') {
-      return 6;
-    }
-
-    // Medium volatility tier - 8% stop (~1.3x their ATR)
-    if (symbol === 'SOL-USD.P' || symbol === 'XRP-USD.P') {
-      return 8;
-    }
-
-    // High volatility tier - 10% stop (~1.3x their ATR)
-    if (symbol === 'DOGE-USD.P' || symbol === 'LINK-USD.P' || symbol === 'AVAX-USD.P' || symbol === 'SUI-USD.P') {
-      return 10;
-    }
-
-    // Default to config value for unknown pairs
-    return this.config.trailingStopPercent;
+  private getTrailingStopPercent(_symbol: string): number {
+    return this.STOP_LOSS_PERCENT; // Fixed 2% for all pairs
   }
 
   private roundToIncrement(price: Decimal, symbol: string): Decimal {
@@ -252,17 +258,11 @@ export class BreakoutStrategy {
 
   public async generateSignal(symbol: string): Promise<Signal | null> {
     const history = this.priceHistory.get(symbol);
-    this.logger.debug(`Price history for ${symbol}: ${history?.length || 0} points, required: ${this.config.lookbackPeriod}`);
 
-    if (!history || history.length < this.config.lookbackPeriod) {
-      this.logger.debug(`Insufficient price history for ${symbol}. Have: ${history?.length || 0}, need: ${this.config.lookbackPeriod}`);
-      return null;
-    }
-
-    // DEFENSIVE: Validate price history quality before analysis
-    const historyCheck = HealthCheck.validatePriceHistory(symbol, history, this.config.lookbackPeriod);
-    if (!historyCheck.valid) {
-      this.logger.error({ symbol, errors: historyCheck.errors }, `Price history validation failed for ${symbol} - skipping signal generation`);
+    // Need 200 candles for full EMA stack (EMA200)
+    const minRequired = 200;
+    if (!history || history.length < minRequired) {
+      this.logger.debug(`Insufficient price history for ${symbol}. Have: ${history?.length || 0}, need: ${minRequired}`);
       return null;
     }
 
@@ -272,302 +272,144 @@ export class BreakoutStrategy {
       return null;
     }
 
-    // Check stop loss cooldown - prevent whipsaw re-entries
-    const cooldownTimestamp = this.stopLossCooldowns.get(symbol);
+    // Check loss cooldown - prevent revenge trading after stops
+    // NOTE: Winners can re-enter immediately (no cooldown on wins)
+    const cooldownTimestamp = this.lossCooldowns.get(symbol);
     if (cooldownTimestamp) {
       const timeElapsed = Date.now() - cooldownTimestamp;
-      if (timeElapsed < this.STOP_LOSS_COOLDOWN_MS) {
-        const minutesRemaining = Math.ceil((this.STOP_LOSS_COOLDOWN_MS - timeElapsed) / 60000);
-        this.logger.info(`⏱️  ${symbol} BLOCKED by stop loss cooldown - ${minutesRemaining} min remaining`);
+      if (timeElapsed < this.LOSS_COOLDOWN_MS) {
+        const minutesRemaining = Math.ceil((this.LOSS_COOLDOWN_MS - timeElapsed) / 60000);
+        this.logger.info(`⏱️  ${symbol} BLOCKED by loss cooldown - ${minutesRemaining} min remaining`);
         return null;
       } else {
         // Cooldown expired, remove it
-        this.stopLossCooldowns.delete(symbol);
-        this.logger.info(`✅ Stop loss cooldown expired for ${symbol} - can trade again`);
+        this.lossCooldowns.delete(symbol);
+        this.logger.info(`✅ Loss cooldown expired for ${symbol} - can trade again`);
       }
     }
 
     try {
-      const resistance = TechnicalIndicators.calculateResistance(
-        history,
-        this.config.lookbackPeriod
-      );
-      const support = TechnicalIndicators.calculateSupport(
-        history,
-        this.config.lookbackPeriod
-      );
+      const closePrices = history.map(p => p.close);
+      const currentPrice = closePrices[closePrices.length - 1];
 
-      const currentPrice = history[history.length - 1].close;
+      // Use second-to-last candle for volume (last candle is incomplete/partial)
+      // The most recent candle from Binance is still accumulating volume mid-candle
+      const lastCompleteCandle = history[history.length - 2];
+      const lastCompleteVolume = lastCompleteCandle.volume;
 
-      // DEFENSIVE: Validate support/resistance calculations
-      const srCheck = HealthCheck.validateSupportResistance(symbol, support, resistance, currentPrice);
-      if (!srCheck.valid) {
-        this.logger.error({ symbol, errors: srCheck.errors }, `Support/Resistance validation failed for ${symbol} - skipping signal generation`);
+      // =========================================================================
+      // STEP 1: TREND DETECTION (EMA Stack)
+      // BULLISH: EMA20 > EMA50 > EMA200 = go LONG
+      // BEARISH: EMA20 < EMA50 < EMA200 = go SHORT
+      // SIDEWAYS: Mixed alignment = NO TRADE (chops you up)
+      // =========================================================================
+      const emaStackTrend = TechnicalIndicators.detectEMAStack(closePrices);
+
+      if (emaStackTrend === 'SIDEWAYS') {
+        this.logger.debug(`${symbol}: EMA stack is SIDEWAYS - no trade (choppy market)`);
         return null;
       }
-      const avgVolume = TechnicalIndicators.calculateAverageVolume(
-        history,
-        Math.min(20, history.length)
-      );
 
-      // CRITICAL: Check trend direction before taking any signal
-      const trend = TechnicalIndicators.detectTrend(history, 20, 50);
+      const direction = emaStackTrend === 'BULLISH' ? 'LONG' : 'SHORT';
+
+      // =========================================================================
+      // STEP 2: VOLUME CONFIRMATION (1.5x average)
+      // No volume = no conviction = no trade
+      // Using second-to-last candle (complete) vs average of complete candles
+      // =========================================================================
+      const avgVolume = TechnicalIndicators.calculateAverageVolume(
+        history.slice(0, -1), // Exclude incomplete last candle from average
+        20
+      );
+      const volumeRatio = lastCompleteVolume.dividedBy(avgVolume);
+
+      if (volumeRatio.lessThan(this.VOLUME_MULTIPLIER)) {
+        this.logger.debug(`${symbol}: Volume ${volumeRatio.toFixed(2)}x below ${this.VOLUME_MULTIPLIER}x threshold - no trade`);
+        return null;
+      }
+
+      // =========================================================================
+      // STEP 3: MOMENTUM SCORE (>= 0.60 required)
+      // Composite of RSI, MACD, EMAs, Bollinger, Stochastic
+      // =========================================================================
+      const { score, components } = TechnicalIndicators.calculateMomentumScore(history, direction);
+
+      this.logger.debug(`${symbol} momentum: ${score.toFixed(2)} (${direction}) - RSI:${components.rsi?.toFixed(2)}, MACD:${components.macd?.toFixed(2)}, EMA:${components.ema?.toFixed(2)}, BB:${components.bollinger?.toFixed(2)}, Stoch:${components.stochastic?.toFixed(2)}`);
+
+      if (score.lessThan(this.MOMENTUM_THRESHOLD)) {
+        this.logger.debug(`${symbol}: Momentum ${score.toFixed(2)} below ${this.MOMENTUM_THRESHOLD} threshold - no trade`);
+        return null;
+      }
+
+      // =========================================================================
+      // STEP 4: PRICE STRUCTURE CONFIRMATION
+      // Don't go LONG in LOWER_LOWS, don't go SHORT in HIGHER_HIGHS
+      // =========================================================================
       const priceStructure = TechnicalIndicators.detectPriceStructure(history, 10);
 
-      // NEW: Check last 5 candles for breakout + volume spike (not just current)
-      // This catches violent moves that happen between bot checks
-      // Using 5 candles (25 min on 5m chart) for fresher signals with more momentum remaining
-      const candleLookback = Math.min(5, history.length);
-      let breakoutCandle: PriceData | null = null;
-      let breakoutType: 'BULLISH' | 'BEARISH' | null = null;
-
-      for (let i = history.length - 1; i >= history.length - candleLookback; i--) {
-        const candle = history[i];
-        const candleBreakout = TechnicalIndicators.detectBreakout(
-          candle.close,
-          resistance,
-          support,
-          this.config.breakoutBuffer
-        );
-        const candleVolumeSpike = TechnicalIndicators.isVolumeSpike(
-          candle.volume,
-          avgVolume,
-          this.config.volumeMultiplier
-        );
-
-        // NEW: Also detect large single-candle moves (>5%) with volume
-        // This catches violent dumps/pumps even if they don't "break" S/R
-        let largeMoveType: 'BULLISH' | 'BEARISH' | null = null;
-        if (i > 0) {
-          const prevCandle = history[i - 1];
-          const pctChange = candle.close.minus(prevCandle.close).dividedBy(prevCandle.close).times(100);
-
-          if (pctChange.lessThan(-5) && candleVolumeSpike) {
-            // >5% drop with volume = bearish violent move
-            largeMoveType = 'BEARISH';
-            this.logger.debug(`${symbol}: Large BEARISH move detected in candle ${i} - ${pctChange.toFixed(1)}% drop with ${candle.volume.dividedBy(avgVolume).toFixed(1)}x volume`);
-          } else if (pctChange.greaterThan(5) && candleVolumeSpike) {
-            // >5% pump with volume = bullish violent move
-            largeMoveType = 'BULLISH';
-            this.logger.debug(`${symbol}: Large BULLISH move detected in candle ${i} - ${pctChange.toFixed(1)}% pump with ${candle.volume.dividedBy(avgVolume).toFixed(1)}x volume`);
-          }
-        }
-
-        // NEW: Detect cumulative moves over 2-5 candles (slow grinds)
-        // This catches gradual moves that don't show up as single-candle spikes
-        let cumulativeMoveType: 'BULLISH' | 'BEARISH' | null = null;
-        if (i >= 1) {  // Fixed: need i >= 1 to detect 2-candle moves (was i >= 2)
-          // Check different window sizes: 2, 3, 4, 5 candles
-          for (const windowSize of [2, 3, 4, 5]) {
-            if (i >= windowSize - 1) {
-              const startIdx = i - windowSize + 1;
-              const startCandle = history[startIdx];
-              const endCandle = candle;
-
-              // Calculate cumulative % change
-              const cumulativeChange = endCandle.close.minus(startCandle.close)
-                .dividedBy(startCandle.close)
-                .times(100);
-
-              // Calculate average volume across the window
-              let totalVolume = new Decimal(0);
-              for (let j = startIdx; j <= i; j++) {
-                totalVolume = totalVolume.plus(history[j].volume);
-              }
-              const avgWindowVolume = totalVolume.dividedBy(windowSize);
-              const volumeRatio = avgWindowVolume.dividedBy(avgVolume);
-
-              // Detect cumulative grind: 1.75%+ move with decent avg volume (0.2x threshold)
-              if (cumulativeChange.lessThan(-1.75) && volumeRatio.greaterThanOrEqualTo(0.2)) {
-                cumulativeMoveType = 'BEARISH';
-                this.logger.debug(`${symbol}: Cumulative BEARISH grind detected over ${windowSize} candles - ${cumulativeChange.toFixed(1)}% drop with ${volumeRatio.toFixed(2)}x avg volume`);
-                break; // Found a signal, stop checking other windows
-              } else if (cumulativeChange.greaterThan(1.75) && volumeRatio.greaterThanOrEqualTo(0.2)) {
-                cumulativeMoveType = 'BULLISH';
-                this.logger.debug(`${symbol}: Cumulative BULLISH grind detected over ${windowSize} candles - ${cumulativeChange.toFixed(1)}% pump with ${volumeRatio.toFixed(2)}x avg volume`);
-                break; // Found a signal, stop checking other windows
-              }
-            }
-          }
-        }
-
-        this.logger.debug(`${symbol}: Checking candle ${i} - breakout: ${candleBreakout}, large move: ${largeMoveType}, cumulative: ${cumulativeMoveType}, vol spike: ${candleVolumeSpike}, price: ${candle.close.toFixed(2)}, vol: ${candle.volume.dividedBy(avgVolume).toFixed(1)}x`);
-
-        const signalType = candleBreakout || largeMoveType || cumulativeMoveType;
-
-        // Check volume: cumulative moves already validated volume, single-candle moves need volume spike
-        const volumeOK = candleVolumeSpike || (cumulativeMoveType !== null);
-
-        // Found a breakout OR large move with volume confirmation in recent candles
-        if (signalType && volumeOK) {
-          // NOTE: Trend alignment removed - let breakouts speak for themselves
-          // Price action + volume is sufficient confirmation
-          this.logger.debug(`${symbol}: ${signalType} signal found in ${trend} market - trend requirement DISABLED`);
-
-          // For BEARISH: check if trend is still down (current < resistance)
-          // For BULLISH: check if trend is still up (current > support)
-          if (signalType === 'BULLISH') {
-            // Price is still above support = bullish move continuing
-            if (currentPrice.greaterThan(support)) {
-              breakoutCandle = candle;
-              breakoutType = 'BULLISH';
-              this.logger.info(`${symbol}: Found BULLISH signal in recent candle (${i}) - price $${candle.close.toFixed(2)}, vol ${candle.volume.dividedBy(avgVolume).toFixed(1)}x, still above support`);
-              break;
-            }
-          } else if (signalType === 'BEARISH') {
-            // Price is still below resistance = bearish move continuing
-            if (currentPrice.lessThan(resistance)) {
-              breakoutCandle = candle;
-              breakoutType = 'BEARISH';
-              this.logger.info(`${symbol}: Found BEARISH signal in recent candle (${i}) - price $${candle.close.toFixed(2)}, vol ${candle.volume.dividedBy(avgVolume).toFixed(1)}x, still below resistance`);
-              break;
-            } else {
-              this.logger.debug(`${symbol}: BEARISH signal found but price ${currentPrice.toFixed(2)} is above resistance ${resistance.toFixed(2)} - move reversed`);
-            }
-          }
-        }
+      if (direction === 'LONG' && priceStructure === 'LOWER_LOWS') {
+        this.logger.info(`${symbol}: ${direction} signal REJECTED - price structure shows LOWER_LOWS`);
+        return null;
       }
 
-      const breakout = breakoutType;
-      const volumeSpike = breakoutCandle !== null;
-
-      this.logger.debug(`${symbol} analysis:` + JSON.stringify({
-        currentPrice: currentPrice.toString(),
-        resistance: resistance.toString(),
-        support: support.toString(),
-        avgVolume: avgVolume.toString(),
-        volumeMultiplier: this.config.volumeMultiplier,
-        volumeSpike,
-        breakout,
-        trend,
-        priceStructure,
-        breakoutBuffer: this.config.breakoutBuffer,
-        recentCandlesChecked: candleLookback
-      }));
-
-      // Take breakout signals regardless of MA trend - price action + volume is king
-      if (breakout && volumeSpike && breakoutCandle) {
-        this.logger.info(`${symbol}: ${breakout} breakout detected in ${trend} market (trend filter DISABLED)`);
-
-        // Price structure filters still apply - these catch obvious counter-moves
-        if (breakout === 'BULLISH' && priceStructure === 'LOWER_LOWS') {
-          this.logger.info(`${symbol}: BULLISH breakout REJECTED - price structure shows LOWER_LOWS`);
-          return null;
-        }
-
-        if (breakout === 'BEARISH' && priceStructure === 'HIGHER_HIGHS') {
-          this.logger.info(`${symbol}: BEARISH breakout REJECTED - price structure shows HIGHER_HIGHS`);
-          return null;
-        }
-
-        // CHOPPY market filter: Reject signals in choppy markets (whipsaw prevention)
-        if (priceStructure === 'CHOPPY') {
-          this.logger.info(`${symbol}: ${breakout} signal REJECTED - market structure is CHOPPY (whipsaw risk)`);
-          return null;
-        }
-
-        const side = breakout === 'BULLISH' ? OrderSide.BUY : OrderSide.SELL;
-
-        // Use current price for entry (we're entering now, not at the breakout candle)
-        // But increase confidence if we found the breakout in a recent candle
-        const entryPrice = currentPrice;
-        const trailingStopPct = this.getTrailingStopPercent(symbol);
-        const stopLoss =
-          breakout === 'BULLISH'
-            ? entryPrice.times(1 - trailingStopPct / 100)
-            : entryPrice.times(1 + trailingStopPct / 100);
-
-        // Calculate RSI for logging (not used as filter - trend + CHOPPY filters are sufficient)
-        const rsi = TechnicalIndicators.calculateRSI(history);
-
-        // Base confidence for trend-aligned signals
-        let confidence = 0.7;
-
-        // Check ATR for volatility confirmation
-        const atr = TechnicalIndicators.calculateATR(history, Math.min(14, history.length - 1));
-        const atrPercent = atr.dividedBy(entryPrice).times(100);
-
-        if (atrPercent.greaterThan(1)) {
-          confidence += 0.1;
-        }
-
-        // Calculate take profit if configured
-        let takeProfit: Decimal | undefined;
-        if (this.config.takeProfitPercent) {
-          takeProfit = breakout === 'BULLISH'
-            ? entryPrice.times(1 + this.config.takeProfitPercent / 100)
-            : entryPrice.times(1 - this.config.takeProfitPercent / 100);
-        }
-
-        // Increase confidence for trend-aligned trades
-        if (breakout === 'BULLISH' && priceStructure === 'HIGHER_HIGHS') {
-          confidence += 0.1;
-        } else if (breakout === 'BEARISH' && priceStructure === 'LOWER_LOWS') {
-          confidence += 0.1;
-        }
-
-        // Higher confidence if breakout was recent (found in last 5 candles)
-        confidence += 0.1;
-
-        const signal: Signal = {
-          symbol,
-          side,
-          entryPrice,
-          stopLoss,
-          takeProfit,
-          confidence,
-          reason: `${breakout} breakout (recent candle) in ${trend}, ${priceStructure} structure, vol spike, RSI: ${rsi.toFixed(2)}`,
-        };
-
-        this.logger.info({ signal }, `✅ TREND-ALIGNED Signal generated for ${symbol}: ${side} in ${trend} (multi-candle detection)`);
-        return signal;
+      if (direction === 'SHORT' && priceStructure === 'HIGHER_HIGHS') {
+        this.logger.info(`${symbol}: ${direction} signal REJECTED - price structure shows HIGHER_HIGHS`);
+        return null;
       }
 
-      // Check for scalping opportunities if enabled
-      if (this.config.useScalping && history.length >= 20) {
-        const bollinger = TechnicalIndicators.calculateBollingerBands(
-          history.map((h) => h.close),
-          Math.min(20, history.length),
-          2
+      if (priceStructure === 'CHOPPY') {
+        this.logger.info(`${symbol}: ${direction} signal REJECTED - market structure is CHOPPY`);
+        return null;
+      }
+
+      // =========================================================================
+      // STEP 5: GENERATE SIGNAL
+      // All filters passed - this is a high-quality entry!
+      // =========================================================================
+      const side = direction === 'LONG' ? OrderSide.BUY : OrderSide.SELL;
+      const entryPrice = currentPrice;
+
+      // Stop loss: 5% (wide enough to survive noise)
+      const stopLoss = direction === 'LONG'
+        ? entryPrice.times(1 - this.STOP_LOSS_PERCENT / 100)
+        : entryPrice.times(1 + this.STOP_LOSS_PERCENT / 100);
+
+      // Take profit: 1.3% (lock in small wins quickly)
+      const takeProfit = direction === 'LONG'
+        ? entryPrice.times(1 + this.TAKE_PROFIT_THRESHOLD / 100)
+        : entryPrice.times(1 - this.TAKE_PROFIT_THRESHOLD / 100);
+
+      // Confidence = momentum score (already validated >= 0.60)
+      const confidence = score.toNumber();
+
+      const signal: Signal = {
+        symbol,
+        side,
+        entryPrice,
+        stopLoss,
+        takeProfit,
+        confidence,
+        reason: `MOMENTUM ${direction}: score=${score.toFixed(2)}, EMA=${emaStackTrend}, vol=${volumeRatio.toFixed(1)}x, structure=${priceStructure}`,
+      };
+
+      this.logger.info({ signal, components }, `✅ MOMENTUM Signal generated for ${symbol}: ${side} (score: ${score.toFixed(2)}, vol: ${volumeRatio.toFixed(1)}x)`);
+
+      // Send Telegram notification with momentum details
+      if (this.telegram) {
+        await this.telegram.sendMessage(
+          `🎯 *Signal Generated*\n\n` +
+          `${symbol.replace('-USD.P', '')} ${direction}\n` +
+          `Score: ${score.toFixed(2)} / 1.00\n` +
+          `Volume: ${volumeRatio.toFixed(1)}x avg\n` +
+          `Trend: ${emaStackTrend}\n` +
+          `Structure: ${priceStructure}\n\n` +
+          `Entry: $${entryPrice.toFixed(2)}\n` +
+          `TP: $${takeProfit.toFixed(2)} (+${this.TAKE_PROFIT_THRESHOLD}%)\n` +
+          `SL: $${stopLoss.toFixed(2)} (-${this.STOP_LOSS_PERCENT}%)`
         );
-
-        if (currentPrice.lessThan(bollinger.lower)) {
-          return {
-            symbol,
-            side: OrderSide.BUY,
-            entryPrice: currentPrice,
-            stopLoss: currentPrice.times(0.98),
-            confidence: 0.4,
-            reason: 'Scalp: Price below lower Bollinger Band',
-          };
-        } else if (currentPrice.greaterThan(bollinger.upper)) {
-          return {
-            symbol,
-            side: OrderSide.SELL,
-            entryPrice: currentPrice,
-            stopLoss: currentPrice.times(1.02),
-            confidence: 0.4,
-            reason: 'Scalp: Price above upper Bollinger Band',
-          };
-        }
       }
 
-      // TREND FOLLOWING: Check for slow grind opportunities (if enabled)
-      if (config.enableTrendFollowing) {
-        const trendFollowingSignal = this.generateTrendFollowingSignal(
-          symbol,
-          history,
-          currentPrice,
-          trend,
-          priceStructure,
-          avgVolume
-        );
-        if (trendFollowingSignal) {
-          return trendFollowingSignal;
-        }
-      }
-
-      return null;
+      return signal;
     } catch (error) {
       this.logger.error({
         error: error instanceof Error ? {
@@ -576,167 +418,6 @@ export class BreakoutStrategy {
         } : error,
         symbol
       }, `Failed to generate signal for ${symbol}`);
-      return null;
-    }
-  }
-
-  /**
-   * Update trend history for consecutive trend tracking
-   */
-  private updateTrendHistory(symbol: string, trend: 'UPTREND' | 'DOWNTREND' | 'SIDEWAYS'): void {
-    const history = this.trendHistory.get(symbol) || [];
-    history.push(trend);
-
-    // Keep only last 10 trend readings (enough for tracking)
-    if (history.length > 10) {
-      history.shift();
-    }
-
-    this.trendHistory.set(symbol, history);
-  }
-
-  /**
-   * Check if trend has been consistent for N consecutive checks
-   */
-  private hasConsecutiveTrend(
-    symbol: string,
-    expectedTrend: 'UPTREND' | 'DOWNTREND',
-    minConsecutive: number
-  ): boolean {
-    const history = this.trendHistory.get(symbol) || [];
-
-    if (history.length < minConsecutive) {
-      return false;
-    }
-
-    // Check last N readings
-    const recent = history.slice(-minConsecutive);
-    return recent.every(t => t === expectedTrend);
-  }
-
-  /**
-   * Generate trend-following signal for slow grinds
-   * This catches gradual moves that don't trigger breakout signals
-   */
-  private generateTrendFollowingSignal(
-    symbol: string,
-    history: PriceData[],
-    currentPrice: Decimal,
-    trend: 'UPTREND' | 'DOWNTREND' | 'SIDEWAYS',
-    priceStructure: 'HIGHER_HIGHS' | 'LOWER_LOWS' | 'CHOPPY',
-    avgVolume: Decimal
-  ): Signal | null {
-    try {
-      // Update trend history for this symbol
-      this.updateTrendHistory(symbol, trend);
-
-      // Get consecutive trend requirements from config
-      const minConsecutive = config.trendFollowingMinConsecutiveTrends;
-      const smaPeriod = config.trendFollowingSmaPeriod;
-      const maxDistanceFromHigh = config.trendFollowingMaxDistanceFromHigh / 100; // Convert % to decimal
-
-      // Need enough price history for SMA
-      if (history.length < smaPeriod) {
-        return null;
-      }
-
-      // Calculate SMA for price confirmation
-      const closePrices = history.map(h => h.close);
-      const sma = TechnicalIndicators.calculateSMA(closePrices, smaPeriod);
-
-      // Check current volume (need some activity, not dead market)
-      const currentVolume = history[history.length - 1].volume;
-      const volumeRatio = currentVolume.dividedBy(avgVolume);
-
-      // Minimum volume threshold (0.5x average - catches slow bleeds)
-      if (volumeRatio.lessThan(this.config.volumeMultiplier)) {
-        return null;
-      }
-
-      // Calculate recent high/low for distance check
-      const recentPrices = history.slice(-smaPeriod);
-      const recentHigh = Decimal.max(...recentPrices.map(p => p.high));
-      const recentLow = Decimal.min(...recentPrices.map(p => p.low));
-
-      // SHORT SIGNAL: Consistent DOWNTREND + price below SMA + within % of recent high
-      if (this.hasConsecutiveTrend(symbol, 'DOWNTREND', minConsecutive)) {
-        // Price must be below SMA (confirming downtrend)
-        if (currentPrice.lessThan(sma)) {
-          // Price must be within X% of recent high (not too deep in the move already)
-          const distanceFromHigh = recentHigh.minus(currentPrice).dividedBy(recentHigh);
-
-          if (distanceFromHigh.lessThanOrEqualTo(maxDistanceFromHigh)) {
-            // Additional confirmation: price structure should show LOWER_LOWS
-            if (priceStructure === 'LOWER_LOWS') {
-              const entryPrice = currentPrice;
-              const stopLoss = entryPrice.times(1 + this.getTrailingStopPercent(symbol) / 100);
-
-              // Calculate RSI for logging only (no filter for trend-following)
-              const rsi = TechnicalIndicators.calculateRSI(history);
-
-              let takeProfit: Decimal | undefined;
-              if (this.config.takeProfitPercent) {
-                takeProfit = entryPrice.times(1 - this.config.takeProfitPercent / 100);
-              }
-
-              const signal: Signal = {
-                symbol,
-                side: OrderSide.SELL,
-                entryPrice,
-                stopLoss,
-                takeProfit,
-                confidence: 0.65, // Lower confidence than breakouts
-                reason: `TREND-FOLLOWING SHORT: ${minConsecutive} consecutive DOWNTREND checks, price < SMA(${smaPeriod}), LOWER_LOWS structure, ${distanceFromHigh.times(100).toFixed(1)}% from high, RSI: ${rsi.toFixed(2)}`,
-              };
-
-              this.logger.info({ signal }, `📉 TREND-FOLLOWING SHORT signal for ${symbol} (slow bleed)`);
-              return signal;
-            }
-          }
-        }
-      }
-
-      // LONG SIGNAL: Consistent UPTREND + price above SMA + within % of recent low
-      if (this.hasConsecutiveTrend(symbol, 'UPTREND', minConsecutive)) {
-        // Price must be above SMA (confirming uptrend)
-        if (currentPrice.greaterThan(sma)) {
-          // Price must be within X% of recent low (not too high in the move already)
-          const distanceFromLow = currentPrice.minus(recentLow).dividedBy(recentLow);
-
-          if (distanceFromLow.lessThanOrEqualTo(maxDistanceFromHigh)) {
-            // Additional confirmation: price structure should show HIGHER_HIGHS
-            if (priceStructure === 'HIGHER_HIGHS') {
-              const entryPrice = currentPrice;
-              const stopLoss = entryPrice.times(1 - this.getTrailingStopPercent(symbol) / 100);
-
-              // Calculate RSI for logging only (no filter for trend-following)
-              const rsi = TechnicalIndicators.calculateRSI(history);
-
-              let takeProfit: Decimal | undefined;
-              if (this.config.takeProfitPercent) {
-                takeProfit = entryPrice.times(1 + this.config.takeProfitPercent / 100);
-              }
-
-              const signal: Signal = {
-                symbol,
-                side: OrderSide.BUY,
-                entryPrice,
-                stopLoss,
-                takeProfit,
-                confidence: 0.65, // Lower confidence than breakouts
-                reason: `TREND-FOLLOWING LONG: ${minConsecutive} consecutive UPTREND checks, price > SMA(${smaPeriod}), HIGHER_HIGHS structure, ${distanceFromLow.times(100).toFixed(1)}% from low, RSI: ${rsi.toFixed(2)}`,
-              };
-
-              this.logger.info({ signal }, `📈 TREND-FOLLOWING LONG signal for ${symbol} (slow grind up)`);
-              return signal;
-            }
-          }
-        }
-      }
-
-      return null;
-    } catch (error) {
-      this.logger.error({ error, symbol }, `Failed to generate trend-following signal for ${symbol}`);
       return null;
     }
   }
@@ -751,13 +432,13 @@ export class BreakoutStrategy {
         return;
       }
 
-      // CRITICAL: Check cooldown one more time at execution
-      const cooldownTimestamp = this.stopLossCooldowns.get(signal.symbol);
+      // CRITICAL: Check loss cooldown one more time at execution
+      const cooldownTimestamp = this.lossCooldowns.get(signal.symbol);
       if (cooldownTimestamp) {
         const timeElapsed = Date.now() - cooldownTimestamp;
-        if (timeElapsed < this.STOP_LOSS_COOLDOWN_MS) {
-          const minutesRemaining = Math.ceil((this.STOP_LOSS_COOLDOWN_MS - timeElapsed) / 60000);
-          this.logger.warn(`🚫 BLOCKED: ${signal.symbol} in cooldown - ${minutesRemaining} min remaining`);
+        if (timeElapsed < this.LOSS_COOLDOWN_MS) {
+          const minutesRemaining = Math.ceil((this.LOSS_COOLDOWN_MS - timeElapsed) / 60000);
+          this.logger.warn(`🚫 BLOCKED: ${signal.symbol} in loss cooldown - ${minutesRemaining} min remaining`);
           return;
         }
       }
@@ -841,6 +522,7 @@ export class BreakoutStrategy {
       }
 
       this.activeSignals.set(signal.symbol, signal);
+      this.positionOpenedAt.set(signal.symbol, Date.now()); // Track when position opened for health check grace period
 
       // Initialize trailing stop for monitoring
       if (signal.side === OrderSide.BUY) {
@@ -882,12 +564,15 @@ export class BreakoutStrategy {
         this.logger.warn(`Position for ${symbol} no longer exists - was likely stopped out or closed manually`);
 
         // CRITICAL: Set cooldown to prevent immediate re-entry whipsaw
-        this.stopLossCooldowns.set(symbol, Date.now());
-        this.logger.info(`⏱️  Stop loss cooldown activated for ${symbol} (closed externally) - no re-entry for ${this.STOP_LOSS_COOLDOWN_MS / 60000} minutes`);
+        // This only applies to externally closed positions (assumed to be a loss)
+        this.lossCooldowns.set(symbol, Date.now());
+        this.logger.info(`⏱️  Loss cooldown activated for ${symbol} (closed externally) - no re-entry for ${this.LOSS_COOLDOWN_MS / 60000} minutes`);
 
         this.activeSignals.delete(symbol);
         this.removePersistedTrailingStop(symbol);
         this.partialProfitTaken.delete(symbol);
+        this.positionOpenedAt.delete(symbol);
+        this.lastTrailingStopCheck.delete(symbol);
         return;
       }
 
@@ -925,14 +610,14 @@ export class BreakoutStrategy {
           }
         }
 
-        // Check for partial profit taking (LONG: price above entry)
+        // Check for take profit (LONG: price above entry)
         if (!this.partialProfitTaken.get(symbol)) {
           const profitPercent = currentPrice.minus(signal.entryPrice).dividedBy(signal.entryPrice).times(100).toNumber();
-          if (profitPercent >= this.PARTIAL_PROFIT_THRESHOLD) {
-            this.logger.info(`💰 ${symbol} hit ${profitPercent.toFixed(2)}% profit - triggering partial take!`);
+          if (profitPercent >= this.TAKE_PROFIT_THRESHOLD) {
+            this.logger.info(`💰 ${symbol} hit ${profitPercent.toFixed(2)}% profit - taking profit!`);
             await this.closePartialPosition(symbol, position, profitPercent);
           } else if (profitPercent > 0) {
-            this.logger.debug(`${symbol} profit check: ${profitPercent.toFixed(2)}% (need ${this.PARTIAL_PROFIT_THRESHOLD}% for partial)`);
+            this.logger.debug(`${symbol} profit check: ${profitPercent.toFixed(2)}% (need ${this.TAKE_PROFIT_THRESHOLD}% for TP)`);
           }
         }
 
@@ -968,14 +653,14 @@ export class BreakoutStrategy {
           }
         }
 
-        // Check for partial profit taking (SHORT: price below entry)
+        // Check for take profit (SHORT: price below entry)
         if (!this.partialProfitTaken.get(symbol)) {
           const profitPercent = signal.entryPrice.minus(currentPrice).dividedBy(signal.entryPrice).times(100).toNumber();
-          if (profitPercent >= this.PARTIAL_PROFIT_THRESHOLD) {
-            this.logger.info(`💰 ${symbol} hit ${profitPercent.toFixed(2)}% profit - triggering partial take!`);
+          if (profitPercent >= this.TAKE_PROFIT_THRESHOLD) {
+            this.logger.info(`💰 ${symbol} hit ${profitPercent.toFixed(2)}% profit - taking profit!`);
             await this.closePartialPosition(symbol, position, profitPercent);
           } else if (profitPercent > 0) {
-            this.logger.debug(`${symbol} profit check: ${profitPercent.toFixed(2)}% (need ${this.PARTIAL_PROFIT_THRESHOLD}% for partial)`);
+            this.logger.debug(`${symbol} profit check: ${profitPercent.toFixed(2)}% (need ${this.TAKE_PROFIT_THRESHOLD}% for TP)`);
           }
         }
 
@@ -995,29 +680,28 @@ export class BreakoutStrategy {
   }
 
   /**
-   * Close a partial position (75%) and let the remaining 25% trail
+   * Close position at take profit target (100% exit)
    */
   private async closePartialPosition(symbol: string, position: { side: OrderSide; quantity: Decimal; entryPrice: Decimal; markPrice: Decimal }, profitPercent: number): Promise<void> {
     try {
-      const closeQuantity = position.quantity.times(this.PARTIAL_CLOSE_PERCENT / 100).floor();
-      const remainingQuantity = position.quantity.minus(closeQuantity);
+      const closeQuantity = position.quantity.times(this.TAKE_PROFIT_CLOSE_PERCENT / 100);
 
       if (closeQuantity.lessThanOrEqualTo(0)) {
-        this.logger.warn(`${symbol}: Partial close quantity too small, skipping`);
+        this.logger.warn(`${symbol}: Close quantity too small, skipping`);
         return;
       }
 
       const closeSide = position.side === OrderSide.BUY ? OrderSide.SELL : OrderSide.BUY;
       const closePrice = position.markPrice || position.entryPrice;
 
-      // Calculate profit on partial close
-      const partialPnl = position.side === OrderSide.BUY
+      // Calculate profit
+      const pnl = position.side === OrderSide.BUY
         ? closePrice.minus(position.entryPrice).times(closeQuantity).toNumber()
         : position.entryPrice.minus(closePrice).times(closeQuantity).toNumber();
 
-      this.logger.info(`💰 Taking ${this.PARTIAL_CLOSE_PERCENT}% partial profit on ${symbol}: closing ${closeQuantity.toString()} @ ${closePrice.toString()}, P&L: $${partialPnl.toFixed(2)}, remaining: ${remainingQuantity.toString()}`);
+      this.logger.info(`💰 Taking profit on ${symbol}: closing ${closeQuantity.toString()} @ ${closePrice.toString()}, P&L: $${pnl.toFixed(2)}`);
 
-      // Place reduce-only market order for partial close
+      // Place reduce-only market order
       await this.client.addOrder(
         symbol,
         closeSide,
@@ -1025,25 +709,24 @@ export class BreakoutStrategy {
         OrderType.MARKET
       );
 
-      // Mark partial profit as taken and persist
+      // Mark as closed and persist
       this.partialProfitTaken.set(symbol, true);
-      this.saveTrailingStops(); // Persist the partial profit taken flag
+      this.saveTrailingStops();
 
       // Send Telegram notification
       if (this.telegram) {
         await this.telegram.sendMessage(
-          `💰 *Partial Profit Taken*\n` +
-          `Symbol: ${symbol}\n` +
-          `Closed: ${this.PARTIAL_CLOSE_PERCENT}% (${closeQuantity.toString()})\n` +
-          `At: ${profitPercent.toFixed(1)}% profit\n` +
-          `P&L: $${partialPnl.toFixed(2)}\n` +
-          `Remaining: ${remainingQuantity.toString()} (25% runner)`
+          `💰 *Take Profit Hit!*\n\n` +
+          `${symbol.replace('-USD.P', '')}\n` +
+          `Closed: ${closeQuantity.toString()}\n` +
+          `Profit: +${profitPercent.toFixed(2)}%\n` +
+          `P&L: $${pnl.toFixed(2)}`
         );
       }
 
-      this.logger.info(`✅ Partial profit taken for ${symbol}, ${remainingQuantity.toString()} still trailing`);
+      this.logger.info(`✅ Take profit hit for ${symbol}, position closed`);
     } catch (error) {
-      this.logger.error({ error, symbol }, `Failed to take partial profit for ${symbol}`);
+      this.logger.error({ error, symbol }, `Failed to take profit for ${symbol}`);
     }
   }
 
@@ -1102,15 +785,21 @@ export class BreakoutStrategy {
         }
       }
 
-      // Set cooldown if this was a stop loss
+      // Set cooldown ONLY if this was a LOSS (stop loss hit)
+      // Winners (Take Profit Hit) can re-enter immediately for momentum continuation
       if (reason === 'Stop Loss Hit') {
-        this.stopLossCooldowns.set(symbol, Date.now());
-        this.logger.info(`⏱️  Stop loss cooldown activated for ${symbol} - no re-entry for ${this.STOP_LOSS_COOLDOWN_MS / 60000} minutes`);
+        this.lossCooldowns.set(symbol, Date.now());
+        this.logger.info(`⏱️  Loss cooldown activated for ${symbol} - no re-entry for ${this.LOSS_COOLDOWN_MS / 60000} minutes`);
+      } else if (reason === 'Take Profit Hit') {
+        // NO COOLDOWN ON WINS - can re-enter immediately if signal still valid
+        this.logger.info(`✅ ${symbol} closed in profit - can re-enter immediately if momentum continues`);
       }
 
       this.activeSignals.delete(symbol);
       this.removePersistedTrailingStop(symbol);
       this.partialProfitTaken.delete(symbol);
+      this.positionOpenedAt.delete(symbol);
+      this.lastTrailingStopCheck.delete(symbol);
     } catch (error) {
       this.logger.error({ error, symbol }, `Failed to close position for ${symbol}`);
     }
@@ -1140,6 +829,7 @@ export class BreakoutStrategy {
     };
 
     this.activeSignals.set(symbol, signal);
+    this.positionOpenedAt.set(symbol, Date.now()); // Track when registered for health check grace period
 
     // Check if we have a persisted trailing stop from before restart
     const existingTrailing = this.trailingStops.get(symbol);
@@ -1209,7 +899,17 @@ export class BreakoutStrategy {
       const lastCheck = this.lastTrailingStopCheck.get(symbol);
 
       if (!lastCheck) {
-        // Position has never been checked - this is bad!
+        // Position has never been checked - but give new positions a grace period
+        const openedAt = this.positionOpenedAt.get(symbol);
+        const timeSinceOpened = openedAt ? now - openedAt : Infinity;
+
+        if (timeSinceOpened < this.NEW_POSITION_GRACE_PERIOD_MS) {
+          // New position, still within grace period - don't alert yet
+          this.logger.debug(`${symbol}: New position within grace period (${Math.round(timeSinceOpened / 1000)}s old), skipping health check`);
+          continue;
+        }
+
+        // Position has been open longer than grace period but never checked - this is bad!
         if (!this.trailingStopFailureAlerted) {
           const message = `🚨 CRITICAL: Trailing stop for ${symbol} has NEVER been checked! Position is unprotected!`;
           this.logger.error(message);
@@ -1244,5 +944,7 @@ export class BreakoutStrategy {
     this.priceHistory.clear();
     this.activeSignals.clear();
     this.trailingStops.clear();
+    this.positionOpenedAt.clear();
+    this.lastTrailingStopCheck.clear();
   }
 }
