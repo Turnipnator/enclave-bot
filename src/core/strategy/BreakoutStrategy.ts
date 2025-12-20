@@ -47,6 +47,9 @@ export class BreakoutStrategy {
   // Loss Cooldown: Prevent revenge trading after stop loss hits
   // Winners can re-enter immediately (momentum continuation)
   private lossCooldowns: Map<string, number> = new Map(); // symbol -> timestamp when loss occurred
+  // Failed Signal Cooldown: Prevent spam when order execution fails
+  private failedSignalCooldowns: Map<string, number> = new Map(); // symbol -> timestamp when order failed
+  private readonly FAILED_SIGNAL_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes cooldown on failed orders
   // Trailing Stop Health Monitoring: Track last successful check to detect failures
   private lastTrailingStopCheck: Map<string, number> = new Map(); // symbol -> timestamp
   private trailingStopFailureAlerted = false; // Prevent spam alerts
@@ -210,6 +213,58 @@ export class BreakoutStrategy {
     return new Decimal(rounded.toFixed(8)); // Avoid floating point errors
   }
 
+  /**
+   * Round quantity to market's minimum size increment
+   * Returns null if the quantity rounds to 0 (too small to trade)
+   */
+  private roundToSizeIncrement(quantity: Decimal, symbol: string): Decimal | null {
+    let increment: number;
+
+    // Size increments from Enclave API /v1/markets
+    // Note: Most markets require whole number quantities
+    if (symbol === 'BTC-USD.P') {
+      increment = 0.001; // 3 decimal places
+    } else if (symbol === 'ETH-USD.P') {
+      increment = 0.01; // 2 decimal places
+    } else if (symbol === 'SOL-USD.P') {
+      increment = 0.1; // 1 decimal place
+    } else if (symbol === 'AVAX-USD.P') {
+      increment = 1; // Whole numbers
+    } else if (symbol === 'XRP-USD.P') {
+      increment = 1; // Whole numbers
+    } else if (symbol === 'BNB-USD.P') {
+      increment = 0.01; // 2 decimal places
+    } else if (symbol === 'DOGE-USD.P') {
+      increment = 1; // Whole numbers
+    } else if (symbol === 'LINK-USD.P') {
+      increment = 0.1; // 1 decimal place
+    } else if (symbol === 'SUI-USD.P') {
+      increment = 1; // Whole numbers
+    } else if (symbol === 'ARENA-USD.P') {
+      increment = 1; // Whole numbers
+    } else if (symbol === 'HYPE-USD.P') {
+      increment = 0.1; // 1 decimal place
+    } else if (symbol === 'NXP-USD.P') {
+      increment = 1; // Whole numbers
+    } else if (symbol === 'TON-USD.P') {
+      increment = 0.1; // 1 decimal place
+    } else if (symbol === 'ADA-USD.P') {
+      increment = 1; // Whole numbers
+    } else {
+      increment = 1; // Default to whole numbers for safety
+    }
+
+    const qtyNumber = quantity.toNumber();
+    const rounded = Math.floor(qtyNumber / increment) * increment; // Use floor to avoid over-sizing
+
+    if (rounded <= 0) {
+      this.logger.warn(`${symbol}: Quantity ${qtyNumber} rounds to 0 with increment ${increment} - too small to trade`);
+      return null;
+    }
+
+    return new Decimal(rounded.toFixed(8)); // Avoid floating point errors
+  }
+
   public async updatePriceHistory(symbol: string): Promise<void> {
     try {
       const marketData = await this.client.getMarketData(symbol);
@@ -285,6 +340,21 @@ export class BreakoutStrategy {
         // Cooldown expired, remove it
         this.lossCooldowns.delete(symbol);
         this.logger.info(`✅ Loss cooldown expired for ${symbol} - can trade again`);
+      }
+    }
+
+    // Check failed signal cooldown - prevent spam when orders keep failing
+    const failedCooldown = this.failedSignalCooldowns.get(symbol);
+    if (failedCooldown) {
+      const timeElapsed = Date.now() - failedCooldown;
+      if (timeElapsed < this.FAILED_SIGNAL_COOLDOWN_MS) {
+        const minutesRemaining = Math.ceil((this.FAILED_SIGNAL_COOLDOWN_MS - timeElapsed) / 60000);
+        this.logger.debug(`⏱️  ${symbol} BLOCKED by failed signal cooldown - ${minutesRemaining} min remaining`);
+        return null;
+      } else {
+        // Cooldown expired, remove it
+        this.failedSignalCooldowns.delete(symbol);
+        this.logger.info(`✅ Failed signal cooldown expired for ${symbol} - can retry`);
       }
     }
 
@@ -394,20 +464,8 @@ export class BreakoutStrategy {
 
       this.logger.info({ signal, components }, `✅ MOMENTUM Signal generated for ${symbol}: ${side} (score: ${score.toFixed(2)}, vol: ${volumeRatio.toFixed(1)}x)`);
 
-      // Send Telegram notification with momentum details
-      if (this.telegram) {
-        await this.telegram.sendMessage(
-          `🎯 *Signal Generated*\n\n` +
-          `${symbol.replace('-USD.P', '')} ${direction}\n` +
-          `Score: ${score.toFixed(2)} / 1.00\n` +
-          `Volume: ${volumeRatio.toFixed(1)}x avg\n` +
-          `Trend: ${emaStackTrend}\n` +
-          `Structure: ${priceStructure}\n\n` +
-          `Entry: $${entryPrice.toFixed(2)}\n` +
-          `TP: $${takeProfit.toFixed(2)} (+${this.TAKE_PROFIT_THRESHOLD}%)\n` +
-          `SL: $${stopLoss.toFixed(2)} (-${this.STOP_LOSS_PERCENT}%)`
-        );
-      }
+      // NOTE: Telegram notification is sent AFTER successful order execution in executeSignal()
+      // This prevents spam when orders fail to execute
 
       return signal;
     } catch (error) {
@@ -466,18 +524,40 @@ export class BreakoutStrategy {
         quantity = customQuantity;
       } else {
         const positionSizeUSD = new Decimal(this.config.positionSize);
-        quantity = positionSizeUSD.dividedBy(signal.entryPrice);
-        this.logger.info(`Position sizing: $${positionSizeUSD.toString()} / $${signal.entryPrice.toString()} = ${quantity.toString()} ${signal.symbol}`);
+        const rawQuantity = positionSizeUSD.dividedBy(signal.entryPrice);
+        this.logger.info(`Position sizing: $${positionSizeUSD.toString()} / $${signal.entryPrice.toString()} = ${rawQuantity.toString()} ${signal.symbol}`);
+
+        // Round to market's minimum size increment
+        const roundedQuantity = this.roundToSizeIncrement(rawQuantity, signal.symbol);
+        if (!roundedQuantity) {
+          this.logger.warn(`${signal.symbol}: Position size too small after rounding - skipping`);
+          return;
+        }
+        quantity = roundedQuantity;
+        this.logger.info(`Rounded quantity to ${quantity.toString()} for ${signal.symbol}`);
       }
+
+      // CRITICAL: Mark signal as pending BEFORE order execution to prevent regeneration spam
+      // If order fails, we'll clean this up below
+      this.activeSignals.set(signal.symbol, signal);
 
       // Execute market order
       // Place market order (entry only)
-      const order = await this.client.addOrder(
-        signal.symbol,
-        signal.side,
-        quantity,
-        OrderType.MARKET
-      );
+      let order;
+      try {
+        order = await this.client.addOrder(
+          signal.symbol,
+          signal.side,
+          quantity,
+          OrderType.MARKET
+        );
+      } catch (orderError) {
+        // Order failed - remove from active signals and add cooldown to prevent spam
+        this.activeSignals.delete(signal.symbol);
+        this.failedSignalCooldowns.set(signal.symbol, Date.now());
+        this.logger.error({ error: orderError, signal }, `Order execution failed for ${signal.symbol} - cooldown for ${this.FAILED_SIGNAL_COOLDOWN_MS / 60000} minutes`);
+        return;
+      }
 
       this.logger.info(`Market order executed: ${order.id} for ${signal.symbol}`);
 
@@ -521,7 +601,7 @@ export class BreakoutStrategy {
         this.logger.info(`  - Take Profit: ${signal.takeProfit.toString()} (LIMIT order placed)`);
       }
 
-      this.activeSignals.set(signal.symbol, signal);
+      // NOTE: activeSignals already set above before order execution
       this.positionOpenedAt.set(signal.symbol, Date.now()); // Track when position opened for health check grace period
 
       // Initialize trailing stop for monitoring
