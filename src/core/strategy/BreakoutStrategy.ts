@@ -640,13 +640,52 @@ export class BreakoutStrategy {
       const position = positions.find(p => p.symbol === symbol);
 
       if (!position) {
-        // Position no longer exists (closed externally or hit stop), clean up tracking
-        this.logger.warn(`Position for ${symbol} no longer exists - was likely stopped out or closed manually`);
+        // Position no longer exists - check if it was a TP win or a loss
+        // If our TP limit order is gone (filled), it was a take profit
+        // If TP order still exists, position was closed for another reason (stop, manual)
+        const openOrders = await this.client.getOpenOrders(symbol);
+        const tpOrderExists = openOrders.some(o => o.type === OrderType.LIMIT);
 
-        // CRITICAL: Set cooldown to prevent immediate re-entry whipsaw
-        // This only applies to externally closed positions (assumed to be a loss)
-        this.lossCooldowns.set(symbol, Date.now());
-        this.logger.info(`⏱️  Loss cooldown activated for ${symbol} (closed externally) - no re-entry for ${this.LOSS_COOLDOWN_MS / 60000} minutes`);
+        if (!tpOrderExists && signal.takeProfit) {
+          // TP order filled - this was a WIN!
+          this.logger.info(`💰 ${symbol} TP order filled - position closed in profit!`);
+
+          // Calculate approximate P&L (based on entry vs TP price)
+          const pnl = signal.side === OrderSide.BUY
+            ? signal.takeProfit.minus(signal.entryPrice).times(this.config.positionSize.dividedBy(signal.entryPrice)).toNumber()
+            : signal.entryPrice.minus(signal.takeProfit).times(this.config.positionSize.dividedBy(signal.entryPrice)).toNumber();
+
+          // Send Telegram notification for the win
+          if (this.telegram) {
+            await this.telegram.notifyPositionClosed(
+              symbol,
+              signal.side,
+              signal.takeProfit,
+              pnl,
+              'Take Profit Hit (Limit Order Filled)'
+            );
+          }
+
+          // NO cooldown on wins - can re-enter immediately if momentum continues
+          this.logger.info(`✅ ${symbol} closed in profit - can re-enter immediately if momentum continues`);
+        } else {
+          // Position closed for another reason (stop loss, manual close, etc.)
+          this.logger.warn(`Position for ${symbol} no longer exists - was likely stopped out or closed manually`);
+
+          // Set cooldown to prevent immediate re-entry whipsaw
+          this.lossCooldowns.set(symbol, Date.now());
+          this.logger.info(`⏱️  Loss cooldown activated for ${symbol} (closed externally) - no re-entry for ${this.LOSS_COOLDOWN_MS / 60000} minutes`);
+
+          // Cancel any remaining orders for this symbol
+          for (const order of openOrders) {
+            try {
+              await this.client.cancelOrder(order.id);
+              this.logger.info(`Cancelled orphaned order ${order.id} for ${symbol}`);
+            } catch (e) {
+              this.logger.warn({ error: e }, `Failed to cancel order ${order.id}`);
+            }
+          }
+        }
 
         this.activeSignals.delete(symbol);
         this.removePersistedTrailingStop(symbol);
