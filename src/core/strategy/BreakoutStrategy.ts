@@ -539,7 +539,9 @@ export class BreakoutStrategy {
 
       // CRITICAL: Mark signal as pending BEFORE order execution to prevent regeneration spam
       // If order fails, we'll clean this up below
+      // Also set positionOpenedAt to prevent health check race condition
       this.activeSignals.set(signal.symbol, signal);
+      this.positionOpenedAt.set(signal.symbol, Date.now());
 
       // Execute market order
       // Place market order (entry only)
@@ -554,6 +556,7 @@ export class BreakoutStrategy {
       } catch (orderError) {
         // Order failed - remove from active signals and add cooldown to prevent spam
         this.activeSignals.delete(signal.symbol);
+        this.positionOpenedAt.delete(signal.symbol); // Clean up to prevent stale state
         this.failedSignalCooldowns.set(signal.symbol, Date.now());
         this.logger.error({ error: orderError, signal }, `Order execution failed for ${signal.symbol} - cooldown for ${this.FAILED_SIGNAL_COOLDOWN_MS / 60000} minutes`);
         return;
@@ -601,8 +604,7 @@ export class BreakoutStrategy {
         this.logger.info(`  - Take Profit: ${signal.takeProfit.toString()} (LIMIT order placed)`);
       }
 
-      // NOTE: activeSignals already set above before order execution
-      this.positionOpenedAt.set(signal.symbol, Date.now()); // Track when position opened for health check grace period
+      // NOTE: activeSignals and positionOpenedAt already set above before order execution
 
       // Initialize trailing stop for monitoring
       if (signal.side === OrderSide.BUY) {

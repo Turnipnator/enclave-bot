@@ -585,24 +585,48 @@ class TradingBot implements BotStatusProvider {
           const targetUsd = new Decimal(50);
           const rawQuantity = targetUsd.dividedBy(signal.entryPrice);
 
-          // Round to appropriate decimal places based on token price
-          let tokenQuantity: Decimal;
-          if (signal.entryPrice.greaterThan(1000)) {
-            // BTC-like: 4 decimals (e.g., 0.0005 BTC)
-            tokenQuantity = rawQuantity.toDecimalPlaces(4);
-          } else if (signal.entryPrice.greaterThan(100)) {
-            // ETH/BNB-like: 2 decimals (e.g., 0.05 ETH)
-            tokenQuantity = rawQuantity.toDecimalPlaces(2);
-          } else if (signal.entryPrice.greaterThan(1)) {
-            // SOL/AVAX/LINK-like: 1 decimal (e.g., 3.5 SOL)
-            tokenQuantity = rawQuantity.toDecimalPlaces(1);
-          } else if (signal.entryPrice.greaterThan(0.1)) {
-            // DOGE/SUI-like: 0 decimals (e.g., 350 DOGE)
-            tokenQuantity = rawQuantity.toDecimalPlaces(0);
+          // Round to market-specific size increment (from Enclave API /v1/markets)
+          // CRITICAL: Each market has different min size increments!
+          let sizeIncrement: number;
+          if (pair === 'BTC-USD.P') {
+            sizeIncrement = 0.001; // 3 decimal places
+          } else if (pair === 'ETH-USD.P') {
+            sizeIncrement = 0.01; // 2 decimal places
+          } else if (pair === 'SOL-USD.P') {
+            sizeIncrement = 0.1; // 1 decimal place
+          } else if (pair === 'AVAX-USD.P') {
+            sizeIncrement = 1; // Whole numbers
+          } else if (pair === 'XRP-USD.P') {
+            sizeIncrement = 1; // Whole numbers
+          } else if (pair === 'BNB-USD.P') {
+            sizeIncrement = 0.01; // 2 decimal places
+          } else if (pair === 'DOGE-USD.P') {
+            sizeIncrement = 1; // Whole numbers
+          } else if (pair === 'LINK-USD.P') {
+            sizeIncrement = 0.1; // 1 decimal place
+          } else if (pair === 'SUI-USD.P') {
+            sizeIncrement = 1; // Whole numbers
+          } else if (pair === 'ARENA-USD.P') {
+            sizeIncrement = 1; // Whole numbers
+          } else if (pair === 'HYPE-USD.P') {
+            sizeIncrement = 0.1; // 1 decimal place
+          } else if (pair === 'NXP-USD.P') {
+            sizeIncrement = 1; // Whole numbers
+          } else if (pair === 'TON-USD.P') {
+            sizeIncrement = 0.1; // 1 decimal place
+          } else if (pair === 'ADA-USD.P') {
+            sizeIncrement = 1; // Whole numbers
           } else {
-            // Very low price tokens: 0 decimals
-            tokenQuantity = rawQuantity.toDecimalPlaces(0);
+            sizeIncrement = 1; // Default to whole numbers for safety
           }
+
+          // Floor to avoid over-sizing
+          const roundedQty = Math.floor(rawQuantity.toNumber() / sizeIncrement) * sizeIncrement;
+          if (roundedQty <= 0) {
+            logger.warn(`${pair}: Position size ${rawQuantity.toNumber()} rounds to 0 with increment ${sizeIncrement} - skipping`);
+            continue;
+          }
+          const tokenQuantity = new Decimal(roundedQty.toFixed(8));
 
           const actualUsdAmount = tokenQuantity.times(signal.entryPrice);
 
