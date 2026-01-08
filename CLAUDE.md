@@ -117,42 +117,8 @@ LOG_LEVEL=debug
 
 ## VPS Deployment
 
-### Server Details
-- **VPS**: Contabo (same as Binance bot)
-- **IP**: 109.199.105.63
-- **Path**: /opt/enclave-bot
-- **Container**: enclave-trading-bot
-
-### SSH Access
-```bash
-ssh -i ~/.ssh/id_ed25519_vps root@109.199.105.63
-```
-
-### Standard Deploy (after code changes)
-```bash
-# 1. Commit and push locally
-git add . && git commit -m "message" && git push origin main
-
-# 2. Sync VPS and rebuild
-ssh -i ~/.ssh/id_ed25519_vps root@109.199.105.63 "cd /opt/enclave-bot && git fetch origin main && git reset --hard origin/main && docker compose down && docker compose build && docker compose up -d"
-```
-
-### Quick Restart (no code changes)
-```bash
-ssh -i ~/.ssh/id_ed25519_vps root@109.199.105.63 "cd /opt/enclave-bot && docker compose restart"
-```
-
-### Check Status
-```bash
-# Container health
-ssh -i ~/.ssh/id_ed25519_vps root@109.199.105.63 "docker ps | grep enclave"
-
-# Recent logs
-ssh -i ~/.ssh/id_ed25519_vps root@109.199.105.63 "docker logs --tail 50 enclave-trading-bot"
-
-# Check for errors
-ssh -i ~/.ssh/id_ed25519_vps root@109.199.105.63 "docker logs enclave-trading-bot 2>&1 | grep -i error | tail -10"
-```
+See `CLAUDE.local.md` for VPS connection details and deployment commands.
+This file is gitignored and contains sensitive server information.
 
 ---
 
@@ -273,14 +239,14 @@ Usually rate limiting. The bot has retry logic with exponential backoff.
 
 ---
 
-## Other Bots on Same VPS
+## Other Bots
 
-For reference:
-- **Binance Bot**: /opt/Binance_Bot (Python, most mature)
-- **Hyperliquid Bot**: /opt/hyperliquid-bot (TypeScript)
-- **Gold Bot**: /opt/Oanda_Gold
+For reference, other bots use similar patterns:
+- **Binance Bot**: Python, most mature, same strategy
+- **Hyperliquid Bot**: TypeScript, wallet signing
+- **Gold Bot**: Oanda forex
 
-All use similar patterns: Docker Compose, Telegram notifications, momentum strategies.
+All use: Docker Compose, Telegram notifications, momentum strategies.
 
 ---
 
