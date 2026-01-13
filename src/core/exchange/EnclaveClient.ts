@@ -548,13 +548,34 @@ export class EnclaveClient {
   }
 
   private mapOrderStatus(status: string): OrderStatus {
-    switch (status) {
-      case 'open': return OrderStatus.OPEN;
-      case 'fullyfilled': return OrderStatus.FILLED;
-      case 'partiallyfilled': return OrderStatus.PARTIALLY_FILLED;
-      case 'cancelled': return OrderStatus.CANCELLED;
-      case 'rejected': return OrderStatus.REJECTED;
-      default: return OrderStatus.PENDING;
+    const normalizedStatus = status?.toLowerCase() || '';
+    switch (normalizedStatus) {
+      case 'open':
+      case 'new':
+      case 'pending':
+        return OrderStatus.OPEN;
+      case 'filled':
+      case 'fullyfilled':
+      case 'fully_filled':
+      case 'complete':
+      case 'completed':
+      case 'executed':
+        return OrderStatus.FILLED;
+      case 'partiallyfilled':
+      case 'partially_filled':
+      case 'partial':
+        return OrderStatus.PARTIALLY_FILLED;
+      case 'cancelled':
+      case 'canceled':
+        return OrderStatus.CANCELLED;
+      case 'rejected':
+      case 'failed':
+        return OrderStatus.REJECTED;
+      default:
+        // IMPORTANT: Default to FILLED for unknown statuses
+        // This prevents unknown/closed orders from appearing as "open"
+        this.logger.warn(`Unknown order status: "${status}" - treating as FILLED`);
+        return OrderStatus.FILLED;
     }
   }
 
