@@ -674,6 +674,23 @@ export class BreakoutStrategy {
           // Position closed for another reason (stop loss, manual close, etc.)
           this.logger.warn(`Position for ${symbol} no longer exists - was likely stopped out or closed manually`);
 
+          // Calculate approximate P&L (based on entry vs trailing stop)
+          const exitPrice = trailing.stop;
+          const pnl = signal.side === OrderSide.BUY
+            ? exitPrice.minus(signal.entryPrice).times(this.config.positionSize.dividedBy(signal.entryPrice)).toNumber()
+            : signal.entryPrice.minus(exitPrice).times(this.config.positionSize.dividedBy(signal.entryPrice)).toNumber();
+
+          // Send Telegram notification for the loss
+          if (this.telegram) {
+            await this.telegram.notifyPositionClosed(
+              symbol,
+              signal.side,
+              exitPrice,
+              pnl,
+              'Stop Loss Hit (Closed Externally)'
+            );
+          }
+
           // Set cooldown to prevent immediate re-entry whipsaw
           this.lossCooldowns.set(symbol, Date.now());
           this.logger.info(`⏱️  Loss cooldown activated for ${symbol} (closed externally) - no re-entry for ${this.LOSS_COOLDOWN_MS / 60000} minutes`);

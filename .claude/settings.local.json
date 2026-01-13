@@ -47,7 +47,8 @@
       "Bash(python3:*)",
       "Bash(git log:*)",
       "Bash(/usr/local/bin/node /Users/paulturner/.local/share/pnpm/global/5/node_modules/typescript/bin/tsc:*)",
-      "Bash(/opt/homebrew/bin/npx tsc --noEmit)"
+      "Bash(/opt/homebrew/bin/npx tsc --noEmit)",
+      "Bash(/opt/homebrew/bin/pnpm build:*)"
     ],
     "deny": [],
     "ask": []
