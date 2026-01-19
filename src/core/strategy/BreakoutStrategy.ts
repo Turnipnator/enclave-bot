@@ -399,6 +399,24 @@ export class BreakoutStrategy {
       }
 
       // =========================================================================
+      // STEP 2B: SUSTAINED VOLUME CHECK (vol_min3 from Binance_Bot)
+      // Requires MINIMUM of last 3 candles to have >= 1.5x volume
+      // This prevents entries on single volume spikes that quickly fade
+      // =========================================================================
+      const volMin3 = TechnicalIndicators.calculateMinVolumeRatio(
+        history.slice(0, -1), // Exclude incomplete last candle
+        avgVolume,
+        3
+      );
+      if (volMin3.lessThan(this.VOLUME_MULTIPLIER)) {
+        this.logger.debug(
+          `${symbol}: Sustained volume too low - vol_min3=${volMin3.toFixed(2)}x (need >= ${this.VOLUME_MULTIPLIER}x for last 3 candles)`
+        );
+        return null;
+      }
+      this.logger.debug(`${symbol}: Sustained volume confirmed ✓ - vol_min3=${volMin3.toFixed(2)}x`);
+
+      // =========================================================================
       // STEP 3: MOMENTUM SCORE (>= 0.60 required)
       // Composite of RSI, MACD, EMAs, Bollinger, Stochastic
       // =========================================================================
