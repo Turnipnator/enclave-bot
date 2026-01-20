@@ -81,8 +81,7 @@ export class BreakoutStrategy {
   // 0.70+ = very strong (excellent entry)
   private readonly MOMENTUM_THRESHOLD = 0.60;
 
-  // Volume Confirmation: 1.5x average minimum
-  private readonly VOLUME_MULTIPLIER = 1.5;
+  // Volume Confirmation: configurable via VOLUME_MULTIPLIER env var
 
   // Cooldown: 20 minutes AFTER LOSSES ONLY (winners can re-enter immediately)
   private readonly LOSS_COOLDOWN_MS = 20 * 60 * 1000; // 20 minutes
@@ -393,8 +392,8 @@ export class BreakoutStrategy {
       );
       const volumeRatio = lastCompleteVolume.dividedBy(avgVolume);
 
-      if (volumeRatio.lessThan(this.VOLUME_MULTIPLIER)) {
-        this.logger.debug(`${symbol}: Volume ${volumeRatio.toFixed(2)}x below ${this.VOLUME_MULTIPLIER}x threshold - no trade`);
+      if (volumeRatio.lessThan(this.config.volumeMultiplier)) {
+        this.logger.debug(`${symbol}: Volume ${volumeRatio.toFixed(2)}x below ${this.config.volumeMultiplier}x threshold - no trade`);
         return null;
       }
 
@@ -408,9 +407,9 @@ export class BreakoutStrategy {
         avgVolume,
         3
       );
-      if (volMin3.lessThan(this.VOLUME_MULTIPLIER)) {
+      if (volMin3.lessThan(this.config.volumeMultiplier)) {
         this.logger.debug(
-          `${symbol}: Sustained volume too low - vol_min3=${volMin3.toFixed(2)}x (need >= ${this.VOLUME_MULTIPLIER}x for last 3 candles)`
+          `${symbol}: Sustained volume too low - vol_min3=${volMin3.toFixed(2)}x (need >= ${this.config.volumeMultiplier}x for last 3 candles)`
         );
         return null;
       }
