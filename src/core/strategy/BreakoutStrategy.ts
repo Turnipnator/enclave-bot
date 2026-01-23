@@ -45,8 +45,9 @@ export class BreakoutStrategy {
   private activeSignals: Map<string, Signal> = new Map();
   private trailingStops: Map<string, { high: Decimal; stop: Decimal }> = new Map();
   // Loss Cooldown: Prevent revenge trading after stop loss hits
-  // Winners can re-enter immediately (momentum continuation)
   private lossCooldowns: Map<string, number> = new Map(); // symbol -> timestamp when loss occurred
+  // Win Cooldown: Prevent rapid re-entry loops when TP fills instantly
+  private winCooldowns: Map<string, number> = new Map(); // symbol -> timestamp when win occurred
   // Failed Signal Cooldown: Prevent spam when order execution fails
   private failedSignalCooldowns: Map<string, number> = new Map(); // symbol -> timestamp when order failed
   private readonly FAILED_SIGNAL_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes cooldown on failed orders
@@ -83,8 +84,9 @@ export class BreakoutStrategy {
 
   // Volume Confirmation: configurable via VOLUME_MULTIPLIER env var
 
-  // Cooldown: 20 minutes AFTER LOSSES ONLY (winners can re-enter immediately)
+  // Cooldown: 20 minutes after losses, 5 minutes after wins
   private readonly LOSS_COOLDOWN_MS = 20 * 60 * 1000; // 20 minutes
+  private readonly WIN_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes - prevents rapid re-entry loops
 
   // Trailing Stop Persistence: File path for persisting trailing stop state across restarts
   private readonly TRAILING_STOPS_FILE = path.join(process.cwd(), 'data', 'trailing_stops.json');
@@ -327,7 +329,6 @@ export class BreakoutStrategy {
     }
 
     // Check loss cooldown - prevent revenge trading after stops
-    // NOTE: Winners can re-enter immediately (no cooldown on wins)
     const cooldownTimestamp = this.lossCooldowns.get(symbol);
     if (cooldownTimestamp) {
       const timeElapsed = Date.now() - cooldownTimestamp;
@@ -336,9 +337,22 @@ export class BreakoutStrategy {
         this.logger.info(`⏱️  ${symbol} BLOCKED by loss cooldown - ${minutesRemaining} min remaining`);
         return null;
       } else {
-        // Cooldown expired, remove it
         this.lossCooldowns.delete(symbol);
         this.logger.info(`✅ Loss cooldown expired for ${symbol} - can trade again`);
+      }
+    }
+
+    // Check win cooldown - prevent rapid re-entry loops when TP fills instantly
+    const winCooldownTimestamp = this.winCooldowns.get(symbol);
+    if (winCooldownTimestamp) {
+      const timeElapsed = Date.now() - winCooldownTimestamp;
+      if (timeElapsed < this.WIN_COOLDOWN_MS) {
+        const minutesRemaining = Math.ceil((this.WIN_COOLDOWN_MS - timeElapsed) / 60000);
+        this.logger.info(`⏱️  ${symbol} BLOCKED by win cooldown - ${minutesRemaining} min remaining`);
+        return null;
+      } else {
+        this.winCooldowns.delete(symbol);
+        this.logger.info(`✅ Win cooldown expired for ${symbol} - can trade again`);
       }
     }
 
@@ -685,8 +699,9 @@ export class BreakoutStrategy {
             );
           }
 
-          // NO cooldown on wins - can re-enter immediately if momentum continues
-          this.logger.info(`✅ ${symbol} closed in profit - can re-enter immediately if momentum continues`);
+          // Win cooldown - prevent rapid re-entry loops
+          this.winCooldowns.set(symbol, Date.now());
+          this.logger.info(`✅ ${symbol} closed in profit - win cooldown ${this.WIN_COOLDOWN_MS / 60000} min`);
         } else {
           // Position closed for another reason (stop loss, manual close, etc.)
           this.logger.warn(`Position for ${symbol} no longer exists - was likely stopped out or closed manually`);
@@ -946,8 +961,9 @@ export class BreakoutStrategy {
         this.lossCooldowns.set(symbol, Date.now());
         this.logger.info(`⏱️  Loss cooldown activated for ${symbol} - no re-entry for ${this.LOSS_COOLDOWN_MS / 60000} minutes`);
       } else if (reason === 'Take Profit Hit') {
-        // NO COOLDOWN ON WINS - can re-enter immediately if signal still valid
-        this.logger.info(`✅ ${symbol} closed in profit - can re-enter immediately if momentum continues`);
+        // Win cooldown - prevent rapid re-entry loops
+        this.winCooldowns.set(symbol, Date.now());
+        this.logger.info(`✅ ${symbol} closed in profit - win cooldown ${this.WIN_COOLDOWN_MS / 60000} min`);
       }
 
       this.activeSignals.delete(symbol);
